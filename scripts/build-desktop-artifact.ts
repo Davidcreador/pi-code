@@ -1561,6 +1561,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         url: resolveMockUpdateServerUrl(mockUpdateServerPort),
       },
     ];
+  } else {
+    // No update repository and no mock server: this is a local build. Left
+    // unset, electron-builder infers a GitHub publish target from the git
+    // remote and then crashes computing update-channel names
+    // (`computeChannelNames` reads `.channel` of null). `null` disables
+    // publishing and the update-info artifacts outright.
+    buildConfig.publish = null;
   }
 
   if (platform === "mac") {
