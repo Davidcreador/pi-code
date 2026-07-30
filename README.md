@@ -1,8 +1,8 @@
-# T3 Code
+# Pi Code
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app, [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+A fork of [T3 Code](https://github.com/pingdotgg/t3code) that puts the T3 Code UI on top of the [pi coding agent](https://pi.dev) — and nothing else. One provider, pi, with its full surface: pi's entire multi-provider model catalog, extensions, skills, prompt templates, sessions, and compaction, driven over pi's RPC protocol.
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, and OpenCode. If they're set up on your computer, T3 Code can control them.
+See [docs/providers/pi.md](./docs/providers/pi.md) for how pi is wired in.
 
 ## "Wait, what are you selling me?"
 
@@ -13,13 +13,12 @@ We wanted something performant, remote-ready, and truly open. If we ever go the 
 ## Installation
 
 > [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build and OpenCode. Install and authenticate at least one provider before use:
+> This fork requires [pi](https://pi.dev). Install it and configure at least one
+> model provider API key before use:
 >
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `cursor-agent login`
-> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
+> ```bash
+> npm install -g @earendil-works/pi-coding-agent
+> ```
 
 ### Try it out (install-free)
 
@@ -69,7 +68,7 @@ There's no public docs site yet, checkout the miscellaneous markdown files in [d
 - [Remote access](./docs/user/remote-access.md)
 - [Keeping T3 Code in sync](./docs/user/server-updates.md)
 - [Architecture overview](./docs/architecture/overview.md)
-- [Provider guides](./docs/providers/codex.md)
+- [Provider guide](./docs/providers/pi.md)
 - [Operations](./docs/operations/ci.md)
 - [Reference](./docs/reference/encyclopedia.md)
 

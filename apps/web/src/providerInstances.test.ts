@@ -301,14 +301,9 @@ describe("getDefaultProviderInstanceModel", () => {
   });
 
   it("falls back to the driver default when the instance reports no models", () => {
-    const providers = [
-      provider({ provider: ProviderDriverKind.make("claudeAgent"), instanceId: "claudeAgent" }),
-    ];
+    const providers = [provider({ provider: ProviderDriverKind.make("pi"), instanceId: "pi" })];
 
-    const resolved = getDefaultProviderInstanceModel(
-      providers,
-      ProviderInstanceId.make("claudeAgent"),
-    );
+    const resolved = getDefaultProviderInstanceModel(providers, ProviderInstanceId.make("pi"));
     expect(typeof resolved).toBe("string");
     expect(resolved?.length).toBeGreaterThan(0);
   });

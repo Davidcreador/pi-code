@@ -147,10 +147,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           },
         },
         textGenerationModelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
+          instanceId: ProviderInstanceId.make("pi"),
           model: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
           options: createModelSelection(
-            ProviderInstanceId.make("codex"),
+            ProviderInstanceId.make("pi"),
             DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
             [
               { id: "reasoningEffort", value: "high" },
@@ -178,7 +178,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(
         next.textGenerationModelSelection,
         createModelSelection(
-          ProviderInstanceId.make("codex"),
+          ProviderInstanceId.make("pi"),
           DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
           [
             { id: "reasoningEffort", value: "high" },
@@ -233,9 +233,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       // cause the update to lose the selected model.
       const next = yield* serverSettings.updateSettings({
         textGenerationModelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
+          instanceId: ProviderInstanceId.make("pi"),
           model: "gpt-5.4",
-          options: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
+          options: createModelSelection(ProviderInstanceId.make("pi"), "gpt-5.4", [
             { id: "reasoningEffort", value: "high" },
           ]).options!,
         },
@@ -243,7 +243,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
       assert.deepEqual(
         next.textGenerationModelSelection,
-        createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
+        createModelSelection(ProviderInstanceId.make("pi"), "gpt-5.4", [
           { id: "reasoningEffort", value: "high" },
         ]),
       );
@@ -407,10 +407,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
       yield* serverSettings.updateSettings({
         textGenerationModelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
+          instanceId: ProviderInstanceId.make("pi"),
           model: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
           options: createModelSelection(
-            ProviderInstanceId.make("codex"),
+            ProviderInstanceId.make("pi"),
             DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
             [
               { id: "reasoningEffort", value: "high" },
@@ -437,7 +437,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   it.effect("replaces provider instance maps when clearing optional fields", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
-      const codexId = ProviderInstanceId.make("codex");
+      const codexId = ProviderInstanceId.make("pi");
 
       yield* serverSettings.updateSettings({
         providerInstances: {

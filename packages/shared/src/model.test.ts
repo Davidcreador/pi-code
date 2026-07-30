@@ -149,9 +149,10 @@ describe("descriptor helpers", () => {
 
 describe("model slug normalization", () => {
   it("preserves exact custom slugs instead of expanding provider aliases", () => {
-    const claude = ProviderDriverKind.make("claudeAgent");
+    // Pi has no slug aliases; unknown shorthand passes through unchanged.
+    const pi = ProviderDriverKind.make("pi");
 
-    expect(normalizeModelSlug("opus", claude)).toBe("claude-opus-5");
+    expect(normalizeModelSlug("opus", pi)).toBe("opus");
     expect(normalizeCustomModelSlug(" opus ")).toBe("opus");
   });
 });
