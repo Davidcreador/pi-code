@@ -1,0 +1,78 @@
+#!/usr/bin/env node
+/**
+ * Scripted stand-in for `pi --mode rpc`, used by PiAdapter.test.ts.
+ *
+ * Answers the handshake commands the adapter issues on `startSession`, then
+ * replays a fixed turn when prompted. A prompt containing "HOLD" starts the
+ * turn but never settles it, so tests can assert interrupt behavior without
+ * racing the natural completion.
+ */
+process.stdin.setEncoding("utf8");
+const w = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+let buf = "";
+
+process.stdin.on("data", (chunk) => {
+  buf += chunk;
+  let i;
+  while ((i = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, i);
+    buf = buf.slice(i + 1);
+    if (!line.trim()) continue;
+    const cmd = JSON.parse(line);
+    switch (cmd.type) {
+      case "get_state":
+        w({
+          type: "response",
+          id: cmd.id,
+          command: "get_state",
+          success: true,
+          data: {
+            sessionId: "fake-session",
+            thinkingLevel: "medium",
+            model: { provider: "anthropic", id: "claude-haiku-4-5" },
+          },
+        });
+        break;
+      case "set_model":
+      case "set_thinking_level":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true });
+        break;
+      case "prompt":
+        w({ type: "response", id: cmd.id, command: "prompt", success: true });
+        w({ type: "extension_ui_request", id: "ui-1", method: "setStatus", statusKey: "noise" });
+        w({ type: "agent_start" });
+        if (String(cmd.message).includes("HOLD")) break;
+        w({ type: "message_start", message: { role: "assistant" } });
+        w({
+          type: "message_update",
+          assistantMessageEvent: { type: "thinking_delta", delta: "hmm" },
+        });
+        w({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "O" } });
+        w({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "K" } });
+        w({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "OK" }] },
+        });
+        w({
+          type: "tool_execution_start",
+          toolCallId: "call-1",
+          toolName: "bash",
+          args: { command: "ls" },
+        });
+        w({
+          type: "tool_execution_end",
+          toolCallId: "call-1",
+          toolName: "bash",
+          result: "file.txt",
+        });
+        w({ type: "agent_settled" });
+        break;
+      case "abort":
+        w({ type: "response", id: cmd.id, command: "abort", success: true });
+        w({ type: "agent_settled" });
+        break;
+      default:
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: {} });
+    }
+  }
+});

@@ -5,79 +5,14 @@ import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import * as ServerConfig from "../../config.ts";
 import { makePiAdapter } from "./PiAdapter.ts";
 
-/**
- * A scripted stand-in for the pi binary. It answers the handshake commands
- * the adapter issues on `startSession`, then replays a fixed turn when
- * prompted — including a record the adapter cannot translate, so the pump's
- * per-record isolation is covered too.
- *
- * Writing a real executable (rather than reusing `spawnPiRpc` directly) is
- * what lets this exercise `makePiAdapter` end to end: the adapter owns its
- * own spawn, and `binaryPath` is the only injection point.
- */
-const FAKE_PI = `#!/usr/bin/env node
-process.stdin.setEncoding("utf8");
-const w = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
-let buf = "";
-process.stdin.on("data", (chunk) => {
-  buf += chunk;
-  let i;
-  while ((i = buf.indexOf("\\n")) >= 0) {
-    const line = buf.slice(0, i);
-    buf = buf.slice(i + 1);
-    if (!line.trim()) continue;
-    const cmd = JSON.parse(line);
-    switch (cmd.type) {
-      case "get_state":
-        w({ type: "response", id: cmd.id, command: "get_state", success: true,
-            data: { sessionId: "fake-session", thinkingLevel: "medium",
-                    model: { provider: "anthropic", id: "claude-haiku-4-5" } } });
-        break;
-      case "set_model":
-      case "set_thinking_level":
-        w({ type: "response", id: cmd.id, command: cmd.type, success: true });
-        break;
-      case "prompt":
-        w({ type: "response", id: cmd.id, command: "prompt", success: true });
-        w({ type: "extension_ui_request", id: "ui-1", method: "setStatus", statusKey: "noise" });
-        w({ type: "agent_start" });
-        // "HOLD" keeps the turn open so an abort is the only thing that can
-        // settle it, making the interrupt assertion race-free.
-        if (String(cmd.message).includes("HOLD")) break;
-        w({ type: "message_start", message: { role: "assistant" } });
-        w({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "hmm" } });
-        w({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "O" } });
-        w({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "K" } });
-        w({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "OK" }] } });
-        w({ type: "tool_execution_start", toolCallId: "call-1", toolName: "bash", args: { command: "ls" } });
-        w({ type: "tool_execution_end", toolCallId: "call-1", toolName: "bash", result: "file.txt" });
-        w({ type: "agent_settled" });
-        break;
-      case "abort":
-        w({ type: "response", id: cmd.id, command: "abort", success: true });
-        w({ type: "agent_settled" });
-        break;
-      default:
-        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: {} });
-    }
-  }
-});
-`;
-
-const fakePiPath = (() => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-adapter-test-"));
-  const path = join(dir, "fake-pi");
-  writeFileSync(path, FAKE_PI);
-  chmodSync(path, 0o755);
-  return path;
-})();
+// Scripted stand-in for the pi binary. Spawning a real executable is what
+// lets this exercise `makePiAdapter` end to end: the adapter owns its own
+// spawn, so `binaryPath` is the only injection point.
+const fakePiPath = `${import.meta.dirname}/fixtures/fake-pi`;
 
 const decodePiSettings = Schema.decodeSync(PiSettings);
 const settings = decodePiSettings({ binaryPath: fakePiPath });
