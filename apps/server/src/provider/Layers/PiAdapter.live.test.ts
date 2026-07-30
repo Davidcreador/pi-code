@@ -1,6 +1,7 @@
 import { PiSettings, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Crypto from "effect/Crypto";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -31,7 +32,8 @@ it.live.skipIf(!process.env.PI_E2E)(
           Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-live-" })),
         );
 
-        const threadId = ThreadId.make(`pi-live-${Date.now()}`);
+        const uuid = yield* (yield* Crypto.Crypto).randomUUIDv4;
+        const threadId = ThreadId.make(`pi-live-${uuid}`);
         const seen: Array<string> = [];
 
         const drain = yield* adapter.streamEvents.pipe(
