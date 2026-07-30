@@ -174,7 +174,11 @@ export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcIn
         pending.clear();
         return Effect.forEach(waiting, (deferred) => Deferred.fail(deferred, failure), {
           discard: true,
-        }).pipe(Effect.andThen(Queue.shutdown(events)), Effect.andThen(Queue.shutdown(stdinQueue)));
+        }).pipe(
+          Effect.flatMap(() => Queue.shutdown(events)),
+          Effect.flatMap(() => Queue.shutdown(stdinQueue)),
+          Effect.asVoid,
+        );
       }),
     ),
     Effect.forkScoped,
