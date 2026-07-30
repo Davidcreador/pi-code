@@ -38,8 +38,7 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
   if (!provider.enabled) {
     return {
       headline: "Disabled",
-      detail:
-        provider.message ?? "This provider is installed but disabled for new sessions in T3 Code.",
+      detail: provider.message ?? "This provider is installed but disabled for new sessions in d4.",
     };
   }
   if (!provider.installed) {

@@ -9,10 +9,10 @@ describe("resolveClerkSignInProps", () => {
   });
 
   it("omits the redirect override on packaged desktop", () => {
-    expect(resolveClerkSignInProps("t3code://app/#/settings/general", true)).toEqual({});
+    expect(resolveClerkSignInProps("d4://app/#/settings/general", true)).toEqual({});
   });
 
   it("omits the redirect override on development desktop", () => {
-    expect(resolveClerkSignInProps("t3code-dev://app/#/settings/general", true)).toEqual({});
+    expect(resolveClerkSignInProps("d4-dev://app/#/settings/general", true)).toEqual({});
   });
 });

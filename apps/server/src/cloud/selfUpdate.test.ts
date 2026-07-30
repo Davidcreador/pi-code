@@ -111,13 +111,13 @@ it.layer(NodeServices.layer)("resolveServerSelfUpdateCapability", (it) => {
     const unitDir = path.join(home, ".config", "systemd", "user");
     yield* fs.makeDirectory(unitDir, { recursive: true });
     yield* fs.writeFileString(
-      path.join(unitDir, "t3code.service"),
+      path.join(unitDir, "d4.service"),
       renderBootServiceUnit({
         nodePath: NODE_PATH,
         t3EntryPath: entryPath,
-        baseDir: path.join(home, ".t3"),
-        logPath: path.join(home, ".t3", "userdata", "logs", "boot-service.log"),
-        unitPath: path.join(unitDir, "t3code.service"),
+        baseDir: path.join(home, ".d4"),
+        logPath: path.join(home, ".d4", "userdata", "logs", "boot-service.log"),
+        unitPath: path.join(unitDir, "d4.service"),
       }),
     );
   });
@@ -125,7 +125,7 @@ it.layer(NodeServices.layer)("resolveServerSelfUpdateCapability", (it) => {
   it.effect("reports boot-service for the systemd-spawned unit process", () =>
     Effect.gen(function* () {
       const { home, path } = yield* makeHome();
-      const entryPath = path.join(home, ".t3/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
+      const entryPath = path.join(home, ".d4/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
       yield* writeUnitReferencing(home, entryPath);
       const method = yield* SelfUpdate.resolveServerSelfUpdateCapability({
         desktopManaged: false,
@@ -147,7 +147,7 @@ it.layer(NodeServices.layer)("resolveServerSelfUpdateCapability", (it) => {
   it.effect("does not claim a systemd process owned by another unit", () =>
     Effect.gen(function* () {
       const { home, path } = yield* makeHome();
-      const entryPath = path.join(home, ".t3/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
+      const entryPath = path.join(home, ".d4/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
       yield* writeUnitReferencing(home, entryPath);
       const method = yield* SelfUpdate.resolveServerSelfUpdateCapability({
         desktopManaged: false,
@@ -165,7 +165,7 @@ it.layer(NodeServices.layer)("resolveServerSelfUpdateCapability", (it) => {
   it.effect("reports respawn for a manual run of the pinned artifact", () =>
     Effect.gen(function* () {
       const { home, path } = yield* makeHome();
-      const entryPath = path.join(home, ".t3/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
+      const entryPath = path.join(home, ".d4/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
       yield* writeUnitReferencing(home, entryPath);
       // Same unit on disk, but no INVOCATION_ID: restarting the unit would
       // not replace this process, so it must respawn itself instead.
@@ -197,7 +197,7 @@ it.layer(NodeServices.layer)("resolveServerSelfUpdateCapability", (it) => {
       const { home, path } = yield* makeHome();
       // Desktop ownership wins over every process-shape heuristic: even a
       // systemd-looking pinned artifact belongs to the app that spawned it.
-      const entryPath = path.join(home, ".t3/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
+      const entryPath = path.join(home, ".d4/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
       yield* writeUnitReferencing(home, entryPath);
       const method = yield* SelfUpdate.resolveServerSelfUpdateCapability({
         desktopManaged: true,
@@ -261,10 +261,10 @@ it.layer(NodeServices.layer)("ServerSelfUpdate.update", (it) => {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-self-update-test-" });
-    const baseDir = path.join(home, ".t3");
+    const baseDir = path.join(home, ".d4");
     const entryPath =
       options?.entryPath ??
-      path.join(home, ".t3/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
+      path.join(home, ".d4/runtime/versions/0.0.28/node_modules/t3/dist/bin.mjs");
     const env: NodeJS.ProcessEnv =
       options?.bootService === true
         ? {
@@ -277,13 +277,13 @@ it.layer(NodeServices.layer)("ServerSelfUpdate.update", (it) => {
       const unitDir = path.join(home, ".config", "systemd", "user");
       yield* fs.makeDirectory(unitDir, { recursive: true });
       yield* fs.writeFileString(
-        path.join(unitDir, "t3code.service"),
+        path.join(unitDir, "d4.service"),
         renderBootServiceUnit({
           nodePath: NODE_PATH,
           t3EntryPath: entryPath,
           baseDir,
           logPath: path.join(baseDir, "userdata", "logs", "boot-service.log"),
-          unitPath: path.join(unitDir, "t3code.service"),
+          unitPath: path.join(unitDir, "d4.service"),
         }),
       );
     }
@@ -501,7 +501,7 @@ it.layer(NodeServices.layer)("ServerSelfUpdate.update", (it) => {
         "runtime/versions/0.0.29/node_modules/t3/dist/bin.mjs",
       );
       const unit = yield* context.fs.readFileString(
-        context.path.join(context.home, ".config", "systemd", "user", "t3code.service"),
+        context.path.join(context.home, ".config", "systemd", "user", "d4.service"),
       );
       assert.include(unit, `ExecStart=${NODE_PATH} ${pinnedEntry} serve`);
       assert.deepEqual(
@@ -512,7 +512,7 @@ it.layer(NodeServices.layer)("ServerSelfUpdate.update", (it) => {
 
       assert.deepEqual(context.commands[3], {
         command: "systemctl",
-        args: ["--user", "restart", "t3code.service"],
+        args: ["--user", "restart", "d4.service"],
       });
       assert.lengthOf(context.spawns, 0);
       // systemd replaces the process; the server must not exit itself.

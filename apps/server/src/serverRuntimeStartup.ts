@@ -458,9 +458,9 @@ export const make = Effect.gen(function* () {
         yield* Effect.logDebug("startup phase: browser open check");
         const startupBrowserTarget = yield* resolveStartupBrowserTarget;
         if (serverConfig.mode !== "desktop") {
-          yield* Effect.logInfo(
-            "Authentication required. Open T3 Code using the pairing URL.",
-          ).pipe(Effect.annotateLogs({ pairingUrl: startupBrowserTarget }));
+          yield* Effect.logInfo("Authentication required. Open d4 using the pairing URL.").pipe(
+            Effect.annotateLogs({ pairingUrl: startupBrowserTarget }),
+          );
         }
         yield* runStartupPhase("browser.open", maybeOpenBrowser(startupBrowserTarget));
       }

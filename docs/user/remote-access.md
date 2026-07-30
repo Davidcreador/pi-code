@@ -117,7 +117,7 @@ SSH launch is a desktop feature because it needs local process and SSH access. O
 
 #### SSH Launch Troubleshooting
 
-The desktop SSH launcher connects with a non-interactive `sh` session, writes a small launcher script under `~/.t3/ssh-launch/<host-key>/`, starts or reuses a remote T3 server, and forwards the remote loopback port back to your desktop.
+The desktop SSH launcher connects with a non-interactive `sh` session, writes a small launcher script under `~/.d4/ssh-launch/<host-key>/`, starts or reuses a remote server, and forwards the remote loopback port back to your desktop.
 
 The remote host must have a compatible Node.js runtime. T3 Code uses the server package's `engines.node` requirement:
 
@@ -150,7 +150,7 @@ nvm alias default 24
 
 With mise/asdf/fnm/nodenv, make sure the tool's shim directory is installed and points at a Node version satisfying the range above.
 
-If reconnecting after an app update fails, retry the SSH launch once. The launcher now compares its generated runner script, stops stale launcher-managed remote servers, clears the SSH launch PID/port state, and starts a fresh remote server. You should not normally need to delete `~/.t3/ssh-launch` or kill `t3` processes manually.
+If reconnecting after an app update fails, retry the SSH launch once. The launcher now compares its generated runner script, stops stale launcher-managed remote servers, clears the SSH launch PID/port state, and starts a fresh remote server. You should not normally need to delete `~/.d4/ssh-launch` or kill `t3` processes manually.
 
 ## Updating a Remote Server
 

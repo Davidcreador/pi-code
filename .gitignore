@@ -15,6 +15,8 @@ build/
 release/
 release-mock/
 .t3
+.d4
+.pi-subagents/
 .idea/
 apps/web/.playwright
 apps/web/playwright-report

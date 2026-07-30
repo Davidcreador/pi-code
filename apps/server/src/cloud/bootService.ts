@@ -19,16 +19,16 @@ import * as ProcessRunner from "../processRunner.ts";
 import { ensurePinnedRuntimeInstalled, pinnedRuntimePaths } from "./pinnedRuntime.ts";
 
 /**
- * Installs T3 Code as a per-user boot service. Linux-only for now: systemd
+ * Installs d4 as a per-user boot service. Linux-only for now: systemd
  * user unit + loginctl enable-linger. The service runs a stable or pinned
  * runtime — never an ephemeral `npx t3` cache whose eviction could break
  * startup.
  */
 
-const BOOT_SERVICE_NAME = "t3code";
+const BOOT_SERVICE_NAME = "d4";
 
 export const BOOT_SERVICE_UNIT_FILE = `${BOOT_SERVICE_NAME}.service`;
-export const BOOT_SERVICE_UNIT_ENV = "T3_BOOT_SERVICE_UNIT";
+export const BOOT_SERVICE_UNIT_ENV = "D4_BOOT_SERVICE_UNIT";
 
 const EPHEMERAL_CACHE_SEGMENTS = [
   "/_npx/", // npx
@@ -90,7 +90,7 @@ export function renderBootServiceUnit(plan: BootServicePlan): string {
   // relay connection, and Restart=always covers early-boot failures.
   return [
     "[Unit]",
-    "Description=T3 Code server",
+    "Description=d4 server",
     // Give up after 5 crashes in 5 minutes so a persistently broken install
     // (deleted runtime, broken workspace) stops instead of restarting every
     // 5s forever and growing the unrotated append log without bound.
@@ -100,7 +100,7 @@ export function renderBootServiceUnit(plan: BootServicePlan): string {
     "[Service]",
     "Type=simple",
     "WorkingDirectory=%h",
-    `Environment=T3CODE_HOME=${quoteSystemdValue(plan.baseDir)}`,
+    `Environment=D4_HOME=${quoteSystemdValue(plan.baseDir)}`,
     `Environment=${BOOT_SERVICE_UNIT_ENV}=${BOOT_SERVICE_UNIT_FILE}`,
     `ExecStart=${quoteSystemdValue(plan.nodePath)} ${quoteSystemdValue(plan.t3EntryPath)} serve`,
     "Restart=always",
@@ -145,7 +145,7 @@ export class BootServiceInstallError extends Schema.TaggedErrorClass<BootService
   { cause: Schema.Defect() },
 ) {
   override get message(): string {
-    return "Could not set up the T3 Code background service.";
+    return "Could not set up the d4 background service.";
   }
 }
 
@@ -412,7 +412,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     const unit = yield* fs.readFileString(unitPath);
     // A unit is current only if it matches what install would write now (an
     // older CLI wrote a different runtime/node path) AND the entry point it
-    // references still exists (a pinned runtime under ~/.t3 can be deleted to
+    // references still exists (a pinned runtime under ~/.d4 can be deleted to
     // reclaim space). Either mismatch makes connect offer a repair.
     const entryExists = yield* fs.exists(plannedEntryPath);
     const current = unit === renderBootServiceUnit(plan) && entryExists;
