@@ -13,18 +13,12 @@
  *   2. add it to this array,
  *   3. ensure the runtime layer satisfies its declared `R`.
  *
- * The aggregated `BuiltInDriversEnv` type is the union of every driver's
- * env requirement — the registry layer's `R` is this type, and the runtime
- * layer (ChildProcessSpawner, FileSystem, Path, ServerConfig,
- * OpenCodeRuntime, …) must satisfy it.
+ * This fork ships exactly one driver: pi. Pi is itself a multi-model
+ * harness, so model diversity comes from pi's catalog rather than from
+ * additional drivers.
  *
  * @module provider/builtInDrivers
  */
-import { ClaudeDriver, type ClaudeDriverEnv } from "./Drivers/ClaudeDriver.ts";
-import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
-import { CursorDriver, type CursorDriverEnv } from "./Drivers/CursorDriver.ts";
-import { GrokDriver, type GrokDriverEnv } from "./Drivers/GrokDriver.ts";
-import { OpenCodeDriver, type OpenCodeDriverEnv } from "./Drivers/OpenCodeDriver.ts";
 import { PiDriver, type PiDriverEnv } from "./Drivers/PiDriver.ts";
 import type { AnyProviderDriver } from "./ProviderDriver.ts";
 
@@ -33,24 +27,6 @@ import type { AnyProviderDriver } from "./ProviderDriver.ts";
  * driver. The registry layer declares `R = BuiltInDriversEnv`; the runtime
  * layer must provide every service in this union.
  */
-export type BuiltInDriversEnv =
-  | ClaudeDriverEnv
-  | CodexDriverEnv
-  | CursorDriverEnv
-  | GrokDriverEnv
-  | OpenCodeDriverEnv
-  | PiDriverEnv;
+export type BuiltInDriversEnv = PiDriverEnv;
 
-/**
- * Ordered list of built-in drivers. Order matters only for tie-breaking in
- * UI presentation — the registry itself is keyed by `driverKind`, so
- * iteration order has no functional effect on instance lookup.
- */
-export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [
-  CodexDriver,
-  ClaudeDriver,
-  CursorDriver,
-  GrokDriver,
-  OpenCodeDriver,
-  PiDriver,
-];
+export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [PiDriver];
