@@ -107,6 +107,14 @@ interface PiSessionContext {
   abortRequested: boolean;
   /** Minted item id for the assistant message currently streaming. */
   assistantItemId: string | undefined;
+  /**
+   * True once `item.started` was emitted for the current assistant message.
+   * The item is opened lazily on the first content delta: some models (e.g.
+   * cursor-backed ones) can return an entirely empty assistant message, and
+   * an assistant item with no content breaks downstream assistant-completion
+   * handling.
+   */
+  assistantItemOpened: boolean;
   /** Minted item id for a running compaction, if any. */
   compactionItemId: string | undefined;
   /** Current `provider/modelId` slug, mirrors pi state. */
@@ -178,11 +186,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
         sessions.clear();
-        yield* Effect.forEach(
-          contexts,
-          (context) => Effect.ignoreCause(closePiContext(context)),
-          { concurrency: "unbounded", discard: true },
-        );
+        yield* Effect.forEach(contexts, (context) => Effect.ignoreCause(closePiContext(context)), {
+          concurrency: "unbounded",
+          discard: true,
+        });
       }).pipe(Effect.ensuring(Queue.shutdown(runtimeEvents))),
     );
 
@@ -258,6 +265,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         const turnId = context.activeTurnId;
         context.activeTurnId = undefined;
         context.assistantItemId = undefined;
+        context.assistantItemOpened = false;
         const interrupted = context.abortRequested;
         context.abortRequested = false;
         if (turnId !== undefined) {
@@ -281,16 +289,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           return;
         }
         context.assistantItemId = yield* randomUUIDv4;
-        yield* emit({
-          ...(yield* buildEventBase({
-            threadId: context.session.threadId,
-            turnId: context.activeTurnId,
-            itemId: context.assistantItemId,
-            raw: record,
-          })),
-          type: "item.started",
-          payload: { itemType: "assistant_message", status: "inProgress" },
-        });
+        context.assistantItemOpened = false;
       });
 
     const handleMessageUpdate = (context: PiSessionContext, record: PiRpcRecord) =>
@@ -307,6 +306,18 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
               : undefined;
         if (streamKind === undefined || streamEvent.delta.length === 0) {
           return;
+        }
+        if (!context.assistantItemOpened) {
+          context.assistantItemOpened = true;
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId: context.session.threadId,
+              turnId: context.activeTurnId,
+              itemId: context.assistantItemId,
+            })),
+            type: "item.started",
+            payload: { itemType: "assistant_message", status: "inProgress" },
+          });
         }
         yield* emit({
           ...(yield* buildEventBase({
@@ -326,7 +337,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           return;
         }
         const itemId = context.assistantItemId;
+        const opened = context.assistantItemOpened;
         context.assistantItemId = undefined;
+        context.assistantItemOpened = false;
+        if (!opened) {
+          // The message produced no content; there is no item to close.
+          return;
+        }
         yield* emit({
           ...(yield* buildEventBase({
             threadId: context.session.threadId,
@@ -426,14 +443,25 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         threadId: context.session.threadId,
         turnId: context.activeTurnId,
         raw: record,
-      }).pipe(Effect.flatMap((base) => emit({ ...base, type: "runtime.warning", payload: { message } })));
+      }).pipe(
+        Effect.flatMap((base) => emit({ ...base, type: "runtime.warning", payload: { message } })),
+      );
 
     /**
-     * Extension UI requests come from pi extensions (dialogs, pickers). None
-     * of their widget shapes map onto the orchestration user-input contract
-     * yet, so cancel them instead of letting the extension hang the turn.
-     * Shape reference: pi.dev/docs/latest/rpc, "Extension UI Protocol".
+     * Extension UI requests come from pi extensions. Status-bar and widget
+     * updates are fire-and-forget notifications; everything else (dialogs,
+     * pickers) has no mapping onto the orchestration user-input contract
+     * yet, so cancel it instead of letting the extension hang the turn and
+     * surface one work-log warning. Shape reference: pi.dev/docs/latest/rpc,
+     * "Extension UI Protocol".
      */
+    const EXTENSION_UI_NOTIFICATION_METHODS = new Set([
+      "setStatus",
+      "clearStatus",
+      "setWidget",
+      "clearWidget",
+    ]);
+
     const handleExtensionUiRequest = (context: PiSessionContext, record: PiRpcRecord) =>
       Effect.gen(function* () {
         if (typeof record.id !== "string") {
@@ -442,6 +470,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         yield* context.rpc
           .send({ type: "extension_ui_response", id: record.id, cancelled: true })
           .pipe(Effect.ignore);
+        if (
+          typeof record.method === "string" &&
+          EXTENSION_UI_NOTIFICATION_METHODS.has(record.method)
+        ) {
+          return;
+        }
         yield* handleWarning(
           context,
           "A pi extension requested interactive UI; the request was cancelled (not supported here yet).",
@@ -527,7 +561,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
 
     // ── Model / prompt plumbing ────────────────────────────────────────
 
-    const applyModelSelection = (context: PiSessionContext, modelSelection: ModelSelection | undefined) =>
+    const applyModelSelection = (
+      context: PiSessionContext,
+      modelSelection: ModelSelection | undefined,
+    ) =>
       Effect.gen(function* () {
         if (modelSelection === undefined) {
           return;
@@ -641,6 +678,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           activeTurnId: undefined,
           abortRequested: false,
           assistantItemId: undefined,
+          assistantItemOpened: false,
           compactionItemId: undefined,
           model: undefined,
           thinkingLevel: undefined,
@@ -666,18 +704,16 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           yield* applyModelSelection(context, input.modelSelection);
         }
 
-        yield* rpc.events
-          .pipe(
-            Stream.runForEach((record) => handlePiEvent(context, record)),
-            Effect.ignore,
-            Effect.forkIn(sessionScope),
-          );
-        yield* rpc.awaitExit
-          .pipe(
-            Effect.flatMap((code) => emitUnexpectedExit(context, code)),
-            Effect.ignore,
-            Effect.forkIn(sessionScope),
-          );
+        yield* rpc.events.pipe(
+          Stream.runForEach((record) => handlePiEvent(context, record)),
+          Effect.ignore,
+          Effect.forkIn(sessionScope),
+        );
+        yield* rpc.awaitExit.pipe(
+          Effect.flatMap((code) => emitUnexpectedExit(context, code)),
+          Effect.ignore,
+          Effect.forkIn(sessionScope),
+        );
 
         yield* emit({
           ...(yield* buildEventBase({ threadId: input.threadId })),
@@ -737,9 +773,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         };
       });
 
-    const interruptTurn: ProviderAdapterShape<ProviderAdapterError>["interruptTurn"] = (
-      threadId,
-    ) =>
+    const interruptTurn: ProviderAdapterShape<ProviderAdapterError>["interruptTurn"] = (threadId) =>
       Effect.gen(function* () {
         const context = yield* requireContext(threadId);
         context.abortRequested = true;

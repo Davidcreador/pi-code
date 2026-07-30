@@ -49,11 +49,11 @@ it.live.skipIf(!process.env.PI_E2E)(
           runtimeMode: "full-access",
           modelSelection: {
             instanceId: ProviderInstanceId.make("pi"),
-            model: "anthropic/claude-haiku-4-5",
+            model: process.env.PI_E2E_MODEL ?? "anthropic/claude-haiku-4-5",
           },
         });
         assert.equal(session.status, "ready");
-        assert.equal(session.model, "anthropic/claude-haiku-4-5");
+        assert.equal(session.model, process.env.PI_E2E_MODEL ?? "anthropic/claude-haiku-4-5");
 
         const turn = yield* adapter.sendTurn({
           threadId,
