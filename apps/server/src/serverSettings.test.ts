@@ -95,9 +95,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   it.effect("decodes nested settings patches", () =>
     Effect.gen(function* () {
       assert.deepEqual(
-        yield* decodeSettingsPatch({ providers: { codex: { binaryPath: "/tmp/codex" } } }),
+        yield* decodeSettingsPatch({ providers: { pi: { binaryPath: "/tmp/pi" } } }),
         {
-          providers: { codex: { binaryPath: "/tmp/codex" } },
+          providers: { pi: { binaryPath: "/tmp/pi" } },
         },
       );
 
@@ -142,13 +142,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
       yield* serverSettings.updateSettings({
         providers: {
-          codex: {
-            binaryPath: "/usr/local/bin/codex",
-            homePath: "/Users/julius/.codex",
-          },
-          claudeAgent: {
-            binaryPath: "/usr/local/bin/claude",
-            customModels: ["claude-custom"],
+          pi: {
+            binaryPath: "/usr/local/bin/pi",
           },
         },
         textGenerationModelSelection: {
@@ -167,8 +162,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
       const next = yield* serverSettings.updateSettings({
         providers: {
-          codex: {
-            binaryPath: "/opt/homebrew/bin/codex",
+          pi: {
+            binaryPath: "/opt/homebrew/bin/pi",
           },
         },
         textGenerationModelSelection: {
@@ -176,20 +171,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         },
       });
 
-      assert.deepEqual(next.providers.codex, {
+      assert.deepEqual(next.providers.pi, {
         enabled: true,
-        binaryPath: "/opt/homebrew/bin/codex",
-        homePath: "/Users/julius/.codex",
-        shadowHomePath: "",
-        launchArgs: "",
-        customModels: [],
-      });
-      assert.deepEqual(next.providers.claudeAgent, {
-        enabled: true,
-        binaryPath: "/usr/local/bin/claude",
-        homePath: "",
-        customModels: ["claude-custom"],
-        launchArgs: "",
+        binaryPath: "/opt/homebrew/bin/pi",
       });
       assert.deepEqual(
         next.textGenerationModelSelection,
@@ -213,16 +197,16 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
         yield* serverSettings.updateSettings({
           providers: {
-            codex: {
-              binaryPath: "/usr/local/bin/codex-next",
+            pi: {
+              binaryPath: "/usr/local/bin/pi-next",
             },
           },
         });
 
         const firstChange = yield* changes.pipe(Stream.runHead, Effect.timeout("1 second"));
         assert.equal(
-          Option.getOrUndefined(firstChange)?.providers.codex.binaryPath,
-          "/usr/local/bin/codex-next",
+          Option.getOrUndefined(firstChange)?.providers.pi.binaryPath,
+          "/usr/local/bin/pi-next",
         );
       }),
     ).pipe(Effect.provide(makeServerSettingsLayer())),
@@ -300,7 +284,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
         const next = yield* serverSettings.updateSettings({
           providers: {
-            claudeAgent: {
+            pi: {
               enabled: false,
             },
           },
@@ -493,42 +477,15 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
       const next = yield* serverSettings.updateSettings({
         providers: {
-          codex: {
-            binaryPath: "  /opt/homebrew/bin/codex  ",
-            homePath: "   ",
-          },
-          claudeAgent: {
-            binaryPath: "  /opt/homebrew/bin/claude  ",
-          },
-          opencode: {
-            binaryPath: "  /opt/homebrew/bin/opencode  ",
-            serverUrl: "  http://127.0.0.1:4096  ",
-            serverPassword: "  secret-password  ",
+          pi: {
+            binaryPath: "  /opt/homebrew/bin/pi  ",
           },
         },
       });
 
-      assert.deepEqual(next.providers.codex, {
+      assert.deepEqual(next.providers.pi, {
         enabled: true,
-        binaryPath: "/opt/homebrew/bin/codex",
-        homePath: "",
-        shadowHomePath: "",
-        launchArgs: "",
-        customModels: [],
-      });
-      assert.deepEqual(next.providers.claudeAgent, {
-        enabled: true,
-        binaryPath: "/opt/homebrew/bin/claude",
-        homePath: "",
-        customModels: [],
-        launchArgs: "",
-      });
-      assert.deepEqual(next.providers.opencode, {
-        enabled: true,
-        binaryPath: "/opt/homebrew/bin/opencode",
-        serverUrl: "http://127.0.0.1:4096",
-        serverPassword: "secret-password",
-        customModels: [],
+        binaryPath: "/opt/homebrew/bin/pi",
       });
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
@@ -559,17 +516,13 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
       const next = yield* serverSettings.updateSettings({
         providers: {
-          codex: {
+          pi: {
             binaryPath: "   ",
-          },
-          claudeAgent: {
-            binaryPath: "",
           },
         },
       });
 
-      assert.equal(next.providers.codex.binaryPath, "codex");
-      assert.equal(next.providers.claudeAgent.binaryPath, "claude");
+      assert.equal(next.providers.pi.binaryPath, "pi");
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
@@ -585,18 +538,14 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           otlpMetricsUrl: "http://localhost:4318/v1/metrics",
         },
         providers: {
-          codex: {
-            binaryPath: "/opt/homebrew/bin/codex",
-          },
-          opencode: {
-            serverUrl: "http://127.0.0.1:4096",
-            serverPassword: "secret-password",
+          pi: {
+            binaryPath: "/opt/homebrew/bin/pi",
           },
         },
         automaticGitFetchInterval: Duration.seconds(10),
       });
 
-      assert.equal(next.providers.codex.binaryPath, "/opt/homebrew/bin/codex");
+      assert.equal(next.providers.pi.binaryPath, "/opt/homebrew/bin/pi");
 
       const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
       // @effect-diagnostics-next-line preferSchemaOverJson:off
@@ -607,12 +556,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           otlpMetricsUrl: "http://localhost:4318/v1/metrics",
         },
         providers: {
-          codex: {
-            binaryPath: "/opt/homebrew/bin/codex",
-          },
-          opencode: {
-            serverUrl: "http://127.0.0.1:4096",
-            serverPassword: "secret-password",
+          pi: {
+            binaryPath: "/opt/homebrew/bin/pi",
           },
         },
         backgroundActivity: {
