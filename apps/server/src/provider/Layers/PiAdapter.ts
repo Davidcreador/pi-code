@@ -28,6 +28,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -532,6 +533,25 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       }
     };
 
+    /**
+     * Translation of one pi record must never take the session's event pump
+     * down with it: `Stream.runForEach` stops on the first failure, which
+     * would silently strand the turn (no further deltas, no `turn.completed`).
+     * Mirrors the ingestion worker's `processInputSafely`.
+     */
+    const handlePiEventSafely = (context: PiSessionContext, record: PiRpcRecord) =>
+      handlePiEvent(context, record).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("pi adapter failed to translate a runtime event", {
+                threadId: context.session.threadId,
+                recordType: record.type,
+                cause: Cause.pretty(cause),
+              }),
+        ),
+      );
+
     const emitUnexpectedExit = (context: PiSessionContext, code: number) =>
       Effect.gen(function* () {
         if (yield* Ref.getAndSet(context.stopped, true)) {
@@ -705,7 +725,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         }
 
         yield* rpc.events.pipe(
-          Stream.runForEach((record) => handlePiEvent(context, record)),
+          Stream.runForEach((record) => handlePiEventSafely(context, record)),
           Effect.ignore,
           Effect.forkIn(sessionScope),
         );

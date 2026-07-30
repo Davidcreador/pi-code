@@ -26,6 +26,7 @@ import {
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -332,12 +333,28 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       next.set(id, adapter);
       if (previous.get(id) !== adapter) {
         yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          // Per-event isolation: `runForEach` stops on the first failure, so
+          // an unhandled defect here (e.g. a malformed event from one
+          // adapter) would silently tear down this instance's entire runtime
+          // subscription and strand every in-flight turn. Log and keep
+          // pumping, matching `ProviderRuntimeIngestion`'s worker.
           processRuntimeEvent(
             {
               instanceId: id,
               provider: adapter.provider,
             },
             event,
+          ).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logWarning("provider runtime event pump failed to process event", {
+                    instanceId: id,
+                    eventId: event.eventId,
+                    eventType: event.type,
+                    cause: Cause.pretty(cause),
+                  }),
+            ),
           ),
         ).pipe(Effect.forkScoped);
       }
