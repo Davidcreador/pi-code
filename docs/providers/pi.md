@@ -22,19 +22,19 @@ Protocol reference: https://pi.dev/docs/latest/rpc
 
 ## Command mapping
 
-| Adapter operation | pi RPC |
-| --- | --- |
-| `startSession` | spawn + `get_state` (model, thinkingLevel, sessionName) |
-| `sendTurn` (idle) | `set_model` / `set_thinking_level` if selection changed, then `prompt` (images as base64 attachments) |
-| `sendTurn` (while streaming) | `prompt` with `streamingBehavior: "steer"` |
-| `interruptTurn` | `abort` |
-| `respondToUserInput` | `extension_ui_response` |
-| `respondToRequest` | unsupported — pi has no approval gate (see Semantics) |
-| `readThread` | `get_messages` |
-| `rollbackThread` | not in v1 — candidates: `get_tree` + `fork` |
-| model catalog (snapshot) | `get_available_models` |
-| slash commands + skills (snapshot) | `get_commands` |
-| thinking levels (option descriptor) | `get_available_thinking_levels` |
+| Adapter operation                   | pi RPC                                                                                                |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `startSession`                      | spawn + `get_state` (model, thinkingLevel, sessionName)                                               |
+| `sendTurn` (idle)                   | `set_model` / `set_thinking_level` if selection changed, then `prompt` (images as base64 attachments) |
+| `sendTurn` (while streaming)        | `prompt` with `streamingBehavior: "steer"`                                                            |
+| `interruptTurn`                     | `abort`                                                                                               |
+| `respondToUserInput`                | `extension_ui_response`                                                                               |
+| `respondToRequest`                  | unsupported — pi has no approval gate (see Semantics)                                                 |
+| `readThread`                        | `get_messages`                                                                                        |
+| `rollbackThread`                    | `get_entries` → `fork` (see Rollback)                                                                 |
+| model catalog (snapshot)            | `get_available_models`                                                                                |
+| slash commands + skills (snapshot)  | `get_commands`                                                                                        |
+| thinking levels (option descriptor) | `get_available_thinking_levels`                                                                       |
 
 ## Event mapping
 
@@ -42,27 +42,27 @@ t3code turn = one user→agent cycle. That is pi's `agent_start` → `agent_sett
 span, NOT pi's `turn_start`/`turn_end` (those are per-assistant-message cycles
 inside one run and stay internal to the adapter).
 
-| pi event | runtime event |
-| --- | --- |
-| spawn + `get_state` ok | `session.started`, `session.configured`, `thread.started` |
-| `agent_start` | `turn.started` (model from state), `session.state.changed` → `running` |
-| `agent_settled` | `turn.completed` (`completed` / `failed` / `interrupted` from settle reason), `session.state.changed` → `ready` |
-| `agent_end` with usage | `thread.token-usage.updated` |
-| `message_start` (assistant) | `item.started` `{itemType: "assistant_message"}` |
-| `message_update` `text_delta` | `content.delta` `{streamKind: "assistant_text"}` |
-| `message_update` `thinking_delta` | `content.delta` `{streamKind: "reasoning_text"}` |
-| `message_end` | `item.completed` |
-| `tool_execution_start` | `item.started` (`bash` → `command_execution`; `edit`/`write` → `file_change`; else `dynamic_tool_call`) |
-| `tool_execution_update` | `item.updated` |
-| `tool_execution_end` | `item.completed` `{status: "completed" \| "failed"}` |
-| `bash_execution_update` | `content.delta` `{streamKind: "command_output"}` |
-| `compaction_start` / `compaction_end` | `item.started` / `item.completed` `{itemType: "context_compaction"}` |
-| `auto_retry_start` / `auto_retry_end` | `runtime.warning` |
-| `extension_error` | `runtime.error` `{class: "provider_error"}` |
-| `extension_ui_request` (mappable: select/confirm/input) | `user-input.requested` |
-| `extension_ui_request` (unmappable widget) | auto-cancel via `extension_ui_response` + `runtime.warning` |
-| `queue_update` | ignored — orchestration owns its own queue |
-| process exit | `session.exited` |
+| pi event                                                | runtime event                                                                                                   |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| spawn + `get_state` ok                                  | `session.started`, `session.configured`, `thread.started`                                                       |
+| `agent_start`                                           | `turn.started` (model from state), `session.state.changed` → `running`                                          |
+| `agent_settled`                                         | `turn.completed` (`completed` / `failed` / `interrupted` from settle reason), `session.state.changed` → `ready` |
+| `agent_end` with usage                                  | `thread.token-usage.updated`                                                                                    |
+| `message_start` (assistant)                             | `item.started` `{itemType: "assistant_message"}`                                                                |
+| `message_update` `text_delta`                           | `content.delta` `{streamKind: "assistant_text"}`                                                                |
+| `message_update` `thinking_delta`                       | `content.delta` `{streamKind: "reasoning_text"}`                                                                |
+| `message_end`                                           | `item.completed`                                                                                                |
+| `tool_execution_start`                                  | `item.started` (`bash` → `command_execution`; `edit`/`write` → `file_change`; else `dynamic_tool_call`)         |
+| `tool_execution_update`                                 | `item.updated`                                                                                                  |
+| `tool_execution_end`                                    | `item.completed` `{status: "completed" \| "failed"}`                                                            |
+| `bash_execution_update`                                 | `content.delta` `{streamKind: "command_output"}`                                                                |
+| `compaction_start` / `compaction_end`                   | `item.started` / `item.completed` `{itemType: "context_compaction"}`                                            |
+| `auto_retry_start` / `auto_retry_end`                   | `runtime.warning`                                                                                               |
+| `extension_error`                                       | `runtime.error` `{class: "provider_error"}`                                                                     |
+| `extension_ui_request` (mappable: select/confirm/input) | `user-input.requested`                                                                                          |
+| `extension_ui_request` (unmappable widget)              | auto-cancel via `extension_ui_response` + `runtime.warning`                                                     |
+| `queue_update`                                          | ignored — orchestration owns its own queue                                                                      |
+| process exit                                            | `session.exited`                                                                                                |
 
 Raw envelopes use `RuntimeEventRaw.source: "pi.rpc.event"`.
 
@@ -76,6 +76,19 @@ Raw envelopes use `RuntimeEventRaw.source: "pi.rpc.event"`.
   templates, skills — all invokable by prefixing the prompt with `/name`).
 - `auth`: pi resolves credentials itself (env keys, `pi auth`). The snapshot
   reports authenticated when the model catalog is non-empty.
+
+## Rollback
+
+Rolling back N turns re-roots the conversation just before the Nth most recent
+user message. `fork` takes a user entry id and starts a new branch from it,
+which drops that message and everything after it.
+
+Finding that entry needs care: `get_entries` returns the whole session tree —
+pre-compaction history and abandoned branches included — so the adapter walks
+parent links back from `leafId` to isolate the active branch before counting
+user turns. A fork can be vetoed by a `session_before_fork` extension handler
+(`data.cancelled === true`); that surfaces as a failed rollback rather than a
+silent no-op.
 
 ## Semantics that differ from the removed providers
 

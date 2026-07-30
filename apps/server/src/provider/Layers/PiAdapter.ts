@@ -86,6 +86,72 @@ export function parsePiModelSlug(
   return { provider: slug.slice(0, separator), modelId: slug.slice(separator + 1) };
 }
 
+interface PiBranchEntry {
+  readonly id: string;
+  readonly parentId: string | undefined;
+  readonly role: string | undefined;
+}
+
+function toBranchEntry(raw: unknown): PiBranchEntry | undefined {
+  if (typeof raw !== "object" || raw === null) {
+    return undefined;
+  }
+  const entry = raw as Record<string, unknown>;
+  if (entry.type !== "message" || typeof entry.id !== "string") {
+    return undefined;
+  }
+  const message = entry.message as Record<string, unknown> | undefined;
+  return {
+    id: entry.id,
+    parentId: typeof entry.parentId === "string" ? entry.parentId : undefined,
+    role: typeof message?.role === "string" ? message.role : undefined,
+  };
+}
+
+/**
+ * Entry id of the `numTurns`-th most recent user message on the active
+ * branch, or `undefined` when the branch holds fewer user turns than that.
+ *
+ * `get_entries` spans the whole session tree — pre-compaction history and
+ * abandoned branches included — so the active branch has to be recovered by
+ * walking parent links back from the leaf. Exported for unit testing.
+ */
+export function nthLastUserEntryOnActiveBranch(
+  entries: ReadonlyArray<unknown>,
+  leafId: string | undefined,
+  numTurns: number,
+): string | undefined {
+  if (leafId === undefined || numTurns < 1) {
+    return undefined;
+  }
+  const byId = new Map<string, PiBranchEntry>();
+  for (const raw of entries) {
+    const entry = toBranchEntry(raw);
+    if (entry !== undefined) {
+      byId.set(entry.id, entry);
+    }
+  }
+
+  const userEntryIds: Array<string> = [];
+  const visited = new Set<string>();
+  let cursor: string | undefined = leafId;
+  // Leaf → root, so user entries accumulate newest-first. `visited` guards
+  // against a malformed parent cycle.
+  while (cursor !== undefined && !visited.has(cursor)) {
+    visited.add(cursor);
+    const entry: PiBranchEntry | undefined = byId.get(cursor);
+    if (entry === undefined) {
+      break;
+    }
+    if (entry.role === "user") {
+      userEntryIds.push(entry.id);
+    }
+    cursor = entry.parentId;
+  }
+
+  return userEntryIds[numTurns - 1];
+}
+
 export function piToolItemType(toolName: string): ToolLifecycleItemType {
   switch (toolName) {
     case "bash":
@@ -860,16 +926,51 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         };
       });
 
+    /**
+     * Rolling back N turns means re-rooting the conversation just before the
+     * Nth most recent user message: pi's `fork` takes a user entry id and
+     * starts a new branch from it, which drops that message and everything
+     * after it from the active branch.
+     */
     const rollbackThread: ProviderAdapterShape<ProviderAdapterError>["rollbackThread"] = (
       threadId,
+      numTurns,
     ) =>
-      Effect.fail(
-        new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "rollbackThread",
-          detail: `Rolling back pi threads is not supported yet (thread '${threadId}').`,
-        }),
-      );
+      Effect.gen(function* () {
+        const context = yield* requireContext(threadId);
+        if (numTurns < 1) {
+          return yield* readThread(threadId);
+        }
+
+        const entriesResponse = yield* context.rpc
+          .request({ type: "get_entries" })
+          .pipe(Effect.mapError((cause) => rpcError("get_entries", cause)));
+        const entriesData = entriesResponse.data as Record<string, unknown> | undefined;
+        const entries = Array.isArray(entriesData?.entries) ? entriesData.entries : [];
+        const leafId = typeof entriesData?.leafId === "string" ? entriesData.leafId : undefined;
+
+        const entryId = nthLastUserEntryOnActiveBranch(entries, leafId, numTurns);
+        if (entryId === undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "rollbackThread",
+            issue: `pi session for thread '${threadId}' has fewer than ${numTurns} user turn(s) to roll back.`,
+          });
+        }
+
+        const forked = yield* context.rpc
+          .request({ type: "fork", entryId })
+          .pipe(Effect.mapError((cause) => rpcError("fork", cause)));
+        if ((forked.data as Record<string, unknown> | undefined)?.cancelled === true) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "fork",
+            detail: "A pi extension cancelled the fork; the thread was not rolled back.",
+          });
+        }
+
+        return yield* readThread(threadId);
+      });
 
     const stopAll: ProviderAdapterShape<ProviderAdapterError>["stopAll"] = () =>
       Effect.gen(function* () {

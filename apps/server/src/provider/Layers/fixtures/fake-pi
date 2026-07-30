@@ -10,6 +10,17 @@
 process.stdin.setEncoding("utf8");
 const w = (o) => process.stdout.write(JSON.stringify(o) + "\n");
 let buf = "";
+let lastFork = null;
+
+// Two user turns on the active branch (u1 → a1 → u2 → a2), plus an abandoned
+// sibling branch off a1 that rollback must ignore.
+const ENTRIES = [
+  { type: "message", id: "u1", parentId: null, message: { role: "user" } },
+  { type: "message", id: "a1", parentId: "u1", message: { role: "assistant" } },
+  { type: "message", id: "u2", parentId: "a1", message: { role: "user" } },
+  { type: "message", id: "a2", parentId: "u2", message: { role: "assistant" } },
+  { type: "message", id: "u2-abandoned", parentId: "a1", message: { role: "user" } },
+];
 
 process.stdin.on("data", (chunk) => {
   buf += chunk;
@@ -70,6 +81,34 @@ process.stdin.on("data", (chunk) => {
       case "abort":
         w({ type: "response", id: cmd.id, command: "abort", success: true });
         w({ type: "agent_settled" });
+        break;
+      case "get_entries":
+        w({
+          type: "response",
+          id: cmd.id,
+          command: "get_entries",
+          success: true,
+          data: { entries: ENTRIES, leafId: "a2" },
+        });
+        break;
+      case "fork":
+        lastFork = cmd.entryId;
+        w({
+          type: "response",
+          id: cmd.id,
+          command: "fork",
+          success: true,
+          data: { text: "original prompt", cancelled: cmd.entryId === "u1" },
+        });
+        break;
+      case "get_messages":
+        w({
+          type: "response",
+          id: cmd.id,
+          command: "get_messages",
+          success: true,
+          data: { messages: [{ role: "system", forkedFrom: lastFork }] },
+        });
         break;
       default:
         w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: {} });

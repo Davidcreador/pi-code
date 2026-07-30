@@ -7,7 +7,7 @@ import * as Stream from "effect/Stream";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 import * as ServerConfig from "../../config.ts";
-import { makePiAdapter } from "./PiAdapter.ts";
+import { makePiAdapter, nthLastUserEntryOnActiveBranch } from "./PiAdapter.ts";
 
 // Scripted stand-in for the pi binary. Spawning a real executable is what
 // lets this exercise `makePiAdapter` end to end: the adapter owns its own
@@ -129,4 +129,93 @@ it.layer(layer)("PiAdapter", (it) => {
       }),
     ),
   );
+
+  it.effect("rolls back a turn by forking the last user entry", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+        }).pipe(
+          Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-test-" })),
+        );
+
+        const threadId = ThreadId.make("33333333-3333-4333-8333-333333333333");
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+
+        const snapshot = yield* adapter.rollbackThread(threadId, 1);
+        assert.equal(snapshot.threadId, threadId);
+        assert.deepEqual(snapshot.turns[0]?.items, [{ role: "system", forkedFrom: "u2" }]);
+
+        yield* adapter.stopAll();
+      }),
+    ),
+  );
+
+  it.effect("fails the rollback when an extension cancels the fork", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+        }).pipe(
+          Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-test-" })),
+        );
+
+        const threadId = ThreadId.make("44444444-4444-4444-8444-444444444444");
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+
+        // The fixture cancels forks from `u1`, which is two user turns back.
+        const error = yield* adapter.rollbackThread(threadId, 2).pipe(Effect.flip);
+        assert.include(String((error as { detail?: string }).detail), "cancelled the fork");
+
+        yield* adapter.stopAll();
+      }),
+    ),
+  );
+
+  it.effect("rejects a rollback deeper than the branch's user turns", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+        }).pipe(
+          Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-test-" })),
+        );
+
+        const threadId = ThreadId.make("55555555-5555-4555-8555-555555555555");
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+
+        const error = yield* adapter.rollbackThread(threadId, 5).pipe(Effect.flip);
+        assert.include(String((error as { issue?: string }).issue), "fewer than 5 user turn");
+
+        yield* adapter.stopAll();
+      }),
+    ),
+  );
+});
+
+it("nthLastUserEntryOnActiveBranch walks the active branch only", () => {
+  const entries = [
+    { type: "message", id: "u1", parentId: null, message: { role: "user" } },
+    { type: "message", id: "a1", parentId: "u1", message: { role: "assistant" } },
+    { type: "message", id: "u2", parentId: "a1", message: { role: "user" } },
+    { type: "message", id: "a2", parentId: "u2", message: { role: "assistant" } },
+    // Abandoned sibling branch: newer id, but not reachable from the leaf.
+    { type: "message", id: "u-abandoned", parentId: "a1", message: { role: "user" } },
+  ];
+
+  assert.equal(nthLastUserEntryOnActiveBranch(entries, "a2", 1), "u2");
+  assert.equal(nthLastUserEntryOnActiveBranch(entries, "a2", 2), "u1");
+  assert.isUndefined(nthLastUserEntryOnActiveBranch(entries, "a2", 3));
+  assert.isUndefined(nthLastUserEntryOnActiveBranch(entries, undefined, 1));
+  assert.isUndefined(nthLastUserEntryOnActiveBranch(entries, "a2", 0));
+});
+
+it("nthLastUserEntryOnActiveBranch survives a malformed parent cycle", () => {
+  const entries = [
+    { type: "message", id: "x", parentId: "y", message: { role: "user" } },
+    { type: "message", id: "y", parentId: "x", message: { role: "assistant" } },
+  ];
+
+  assert.equal(nthLastUserEntryOnActiveBranch(entries, "x", 1), "x");
+  assert.isUndefined(nthLastUserEntryOnActiveBranch(entries, "x", 2));
 });
