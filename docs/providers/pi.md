@@ -28,7 +28,7 @@ Protocol reference: https://pi.dev/docs/latest/rpc
 | `sendTurn` (idle)                   | `set_model` / `set_thinking_level` if selection changed, then `prompt` (images as base64 attachments) |
 | `sendTurn` (while streaming)        | `prompt` with `streamingBehavior: "steer"`                                                            |
 | `interruptTurn`                     | `abort`                                                                                               |
-| `respondToUserInput`                | `extension_ui_response`                                                                               |
+| `respondToUserInput`                | `extension_ui_response` (see Extension dialogs)                                                       |
 | `respondToRequest`                  | unsupported — pi has no approval gate (see Semantics)                                                 |
 | `readThread`                        | `get_messages`                                                                                        |
 | `rollbackThread`                    | `get_entries` → `fork` (see Rollback)                                                                 |
@@ -42,27 +42,28 @@ t3code turn = one user→agent cycle. That is pi's `agent_start` → `agent_sett
 span, NOT pi's `turn_start`/`turn_end` (those are per-assistant-message cycles
 inside one run and stay internal to the adapter).
 
-| pi event                                                | runtime event                                                                                                   |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| spawn + `get_state` ok                                  | `session.started`, `session.configured`, `thread.started`                                                       |
-| `agent_start`                                           | `turn.started` (model from state), `session.state.changed` → `running`                                          |
-| `agent_settled`                                         | `turn.completed` (`completed` / `failed` / `interrupted` from settle reason), `session.state.changed` → `ready` |
-| `agent_end` with usage                                  | `thread.token-usage.updated`                                                                                    |
-| `message_start` (assistant)                             | `item.started` `{itemType: "assistant_message"}`                                                                |
-| `message_update` `text_delta`                           | `content.delta` `{streamKind: "assistant_text"}`                                                                |
-| `message_update` `thinking_delta`                       | `content.delta` `{streamKind: "reasoning_text"}`                                                                |
-| `message_end`                                           | `item.completed`                                                                                                |
-| `tool_execution_start`                                  | `item.started` (`bash` → `command_execution`; `edit`/`write` → `file_change`; else `dynamic_tool_call`)         |
-| `tool_execution_update`                                 | `item.updated`                                                                                                  |
-| `tool_execution_end`                                    | `item.completed` `{status: "completed" \| "failed"}`                                                            |
-| `bash_execution_update`                                 | `content.delta` `{streamKind: "command_output"}`                                                                |
-| `compaction_start` / `compaction_end`                   | `item.started` / `item.completed` `{itemType: "context_compaction"}`                                            |
-| `auto_retry_start` / `auto_retry_end`                   | `runtime.warning`                                                                                               |
-| `extension_error`                                       | `runtime.error` `{class: "provider_error"}`                                                                     |
-| `extension_ui_request` (mappable: select/confirm/input) | `user-input.requested`                                                                                          |
-| `extension_ui_request` (unmappable widget)              | auto-cancel via `extension_ui_response` + `runtime.warning`                                                     |
-| `queue_update`                                          | ignored — orchestration owns its own queue                                                                      |
-| process exit                                            | `session.exited`                                                                                                |
+| pi event                                               | runtime event                                                                                                   |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| spawn + `get_state` ok                                 | `session.started`, `session.configured`, `thread.started`                                                       |
+| `agent_start`                                          | `turn.started` (model from state), `session.state.changed` → `running`                                          |
+| `agent_settled`                                        | `turn.completed` (`completed` / `failed` / `interrupted` from settle reason), `session.state.changed` → `ready` |
+| `agent_end` with usage                                 | `thread.token-usage.updated`                                                                                    |
+| `message_start` (assistant)                            | `item.started` `{itemType: "assistant_message"}`                                                                |
+| `message_update` `text_delta`                          | `content.delta` `{streamKind: "assistant_text"}`                                                                |
+| `message_update` `thinking_delta`                      | `content.delta` `{streamKind: "reasoning_text"}`                                                                |
+| `message_end`                                          | `item.completed`                                                                                                |
+| `tool_execution_start`                                 | `item.started` (`bash` → `command_execution`; `edit`/`write` → `file_change`; else `dynamic_tool_call`)         |
+| `tool_execution_update`                                | `item.updated`                                                                                                  |
+| `tool_execution_end`                                   | `item.completed` `{status: "completed" \| "failed"}`                                                            |
+| `bash_execution_update`                                | `content.delta` `{streamKind: "command_output"}`                                                                |
+| `compaction_start` / `compaction_end`                  | `item.started` / `item.completed` `{itemType: "context_compaction"}`                                            |
+| `auto_retry_start` / `auto_retry_end`                  | `runtime.warning`                                                                                               |
+| `extension_error`                                      | `runtime.error` `{class: "provider_error"}`                                                                     |
+| `extension_ui_request` (`select` / `confirm`)          | `user-input.requested`                                                                                          |
+| `extension_ui_request` (`setStatus` / `setWidget` / …) | acknowledged silently, no event                                                                                 |
+| `extension_ui_request` (anything else)                 | auto-cancel via `extension_ui_response` + `runtime.warning`                                                     |
+| `queue_update`                                         | ignored — orchestration owns its own queue                                                                      |
+| process exit                                           | `session.exited`                                                                                                |
 
 Raw envelopes use `RuntimeEventRaw.source: "pi.rpc.event"`.
 
@@ -76,6 +77,26 @@ Raw envelopes use `RuntimeEventRaw.source: "pi.rpc.event"`.
   templates, skills — all invokable by prefixing the prompt with `/name`).
 - `auth`: pi resolves credentials itself (env keys, `pi auth`). The snapshot
   reports authenticated when the model catalog is non-empty.
+
+## Extension dialogs
+
+pi extensions can ask for interactive UI. The three kinds are handled
+differently:
+
+- **Status and widget updates** (`setStatus`, `clearStatus`, `setWidget`,
+  `clearWidget`) are fire-and-forget. They are acknowledged so the extension
+  never blocks, and produce no event — otherwise a normal turn would bury the
+  work log under a dozen entries.
+- **`select` and `confirm`** become a single-question `user-input.requested`,
+  which the composer already renders. The question id is pi's request id, so
+  the answer routes straight back: `select` replies with the chosen option's
+  label, `confirm` replies `confirmed: true` when the user picked _Yes_.
+- **`input` and `editor`** want free-form text, which `UserInputQuestion` has
+  no field for. They are cancelled with a visible warning rather than left to
+  hang until pi's own dialog timeout fires.
+
+An answer that arrives after pi's timeout has already auto-resolved the dialog
+fails with a clear error instead of being silently dropped.
 
 ## Rollback
 

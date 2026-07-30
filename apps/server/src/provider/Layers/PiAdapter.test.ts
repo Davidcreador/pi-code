@@ -1,4 +1,10 @@
-import { PiSettings, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  ApprovalRequestId,
+  PiSettings,
+  ProviderInstanceId,
+  ThreadId,
+  type UserInputQuestion,
+} from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -124,6 +130,150 @@ it.layer(layer)("PiAdapter", (it) => {
 
         const completed = events.find((event) => event.type === "turn.completed");
         assert.equal((completed?.payload as { state: string }).state, "interrupted");
+
+        yield* adapter.stopAll();
+      }),
+    ),
+  );
+
+  it.effect("turns an extension select dialog into a user-input request", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+        }).pipe(
+          Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-test-" })),
+        );
+
+        const threadId = ThreadId.make("66666666-6666-4666-8666-666666666666");
+        const events: Array<{ type: string; payload?: unknown }> = [];
+        const REQUEST_ID = "ui-select";
+        const ANSWER = "Block";
+
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        // Answer from inside the stream: a Queue-backed stream has a single
+        // consumer, and it.effect runs on a TestClock where sleeps never
+        // advance, so reacting to the event is both correct and deterministic.
+        const drain = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) => Effect.sync(() => events.push(event))),
+          Stream.tap((event) =>
+            event.type === "user-input.requested"
+              ? adapter
+                  .respondToUserInput(threadId, ApprovalRequestId.make(REQUEST_ID), {
+                    [REQUEST_ID]: ANSWER,
+                  })
+                  .pipe(Effect.ignore)
+              : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+
+        yield* adapter.sendTurn({ threadId, input: "ASK" });
+        yield* Fiber.awaitAll([drain]);
+
+        const asked = events.find((event) => event.type === "user-input.requested");
+        const question = (asked?.payload as { questions: Array<UserInputQuestion> } | undefined)
+          ?.questions[0];
+        assert.equal(question?.question, "Pick one");
+        assert.deepEqual(
+          question?.options.map((option) => option.label),
+          ["Allow", "Block"],
+        );
+
+        const echoed = events
+          .filter((event) => event.type === "content.delta")
+          .map((event) => (event.payload as { delta: string }).delta)
+          .join("");
+        assert.include(echoed, '"value":"Block"');
+        assert.include(
+          events.map((event) => event.type),
+          "user-input.resolved",
+        );
+
+        yield* adapter.stopAll();
+      }),
+    ),
+  );
+
+  it.effect("maps a confirm dialog to a boolean answer", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+        }).pipe(
+          Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-test-" })),
+        );
+
+        const threadId = ThreadId.make("77777777-7777-4777-8777-777777777777");
+        const events: Array<{ type: string; payload?: unknown }> = [];
+        const REQUEST_ID = "ui-confirm";
+        const ANSWER = "Yes";
+
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        const drain = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) => Effect.sync(() => events.push(event))),
+          Stream.tap((event) =>
+            event.type === "user-input.requested"
+              ? adapter
+                  .respondToUserInput(threadId, ApprovalRequestId.make(REQUEST_ID), {
+                    [REQUEST_ID]: ANSWER,
+                  })
+                  .pipe(Effect.ignore)
+              : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+
+        yield* adapter.sendTurn({ threadId, input: "CONFIRM" });
+        yield* Fiber.awaitAll([drain]);
+
+        const echoed = events
+          .filter((event) => event.type === "content.delta")
+          .map((event) => (event.payload as { delta: string }).delta)
+          .join("");
+        assert.include(echoed, '"confirmed":true');
+
+        yield* adapter.stopAll();
+      }),
+    ),
+  );
+
+  it.effect("cancels dialogs it cannot render", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+        }).pipe(
+          Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-test-" })),
+        );
+
+        const threadId = ThreadId.make("88888888-8888-4888-8888-888888888888");
+        const events: Array<{ type: string; payload?: unknown }> = [];
+
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        const drain = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) => Effect.sync(() => events.push(event))),
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+
+        // `editor` wants free-form text, which the user-input contract cannot
+        // express; the adapter cancels it, which the fixture answers by
+        // closing the turn.
+        yield* adapter.sendTurn({ threadId, input: "EDITOR" });
+        yield* Fiber.awaitAll([drain]);
+
+        const warning = events.find((event) => event.type === "runtime.warning");
+        assert.include(String((warning?.payload as { message: string }).message), "'editor'");
+        assert.notInclude(
+          events.map((event) => event.type),
+          "user-input.requested",
+        );
 
         yield* adapter.stopAll();
       }),

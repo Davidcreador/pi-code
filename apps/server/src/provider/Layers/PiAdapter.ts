@@ -26,6 +26,7 @@ import {
   type ThreadId,
   type ToolLifecycleItemType,
   TurnId,
+  type UserInputQuestion,
 } from "@t3tools/contracts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
@@ -187,7 +188,17 @@ interface PiSessionContext {
   /** Current `provider/modelId` slug, mirrors pi state. */
   model: string | undefined;
   thinkingLevel: string | undefined;
+  /**
+   * Interactive extension UI requests awaiting an answer, keyed by pi's
+   * request id (which doubles as the question id on the wire).
+   */
+  readonly pendingUiRequests: Map<string, PiUiRequestKind>;
 }
+
+type PiUiRequestKind = "select" | "confirm";
+
+const CONFIRM_YES = "Yes";
+const CONFIRM_NO = "No";
 
 export interface PiAdapterOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -529,23 +540,77 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       "clearWidget",
     ]);
 
+    const cancelUiRequest = (context: PiSessionContext, requestId: string) =>
+      context.rpc
+        .send({ type: "extension_ui_response", id: requestId, cancelled: true })
+        .pipe(Effect.ignore);
+
+    const uiQuestionFor = (
+      record: PiRpcRecord,
+      requestId: string,
+    ): UserInputQuestion | undefined => {
+      const title =
+        typeof record.title === "string" && record.title.length > 0 ? record.title : undefined;
+      if (title === undefined) {
+        return undefined;
+      }
+      if (record.method === "select") {
+        const options = (Array.isArray(record.options) ? record.options : [])
+          .filter((option): option is string => typeof option === "string" && option.length > 0)
+          .map((option) => ({ label: option, description: option }));
+        return options.length > 0
+          ? { id: requestId, header: "Extension", question: title, options, multiSelect: false }
+          : undefined;
+      }
+      const message =
+        typeof record.message === "string" && record.message.length > 0 ? record.message : title;
+      return {
+        id: requestId,
+        header: "Extension",
+        question: title,
+        options: [
+          { label: CONFIRM_YES, description: message },
+          { label: CONFIRM_NO, description: "Decline" },
+        ],
+        multiSelect: false,
+      };
+    };
+
     const handleExtensionUiRequest = (context: PiSessionContext, record: PiRpcRecord) =>
       Effect.gen(function* () {
-        if (typeof record.id !== "string") {
+        const requestId = record.id;
+        if (typeof requestId !== "string") {
           return;
         }
-        yield* context.rpc
-          .send({ type: "extension_ui_response", id: record.id, cancelled: true })
-          .pipe(Effect.ignore);
-        if (
-          typeof record.method === "string" &&
-          EXTENSION_UI_NOTIFICATION_METHODS.has(record.method)
-        ) {
+        const method = typeof record.method === "string" ? record.method : "";
+
+        if (EXTENSION_UI_NOTIFICATION_METHODS.has(method)) {
+          yield* cancelUiRequest(context, requestId);
           return;
         }
+
+        if (method === "select" || method === "confirm") {
+          const question = uiQuestionFor(record, requestId);
+          if (question !== undefined) {
+            context.pendingUiRequests.set(requestId, method);
+            yield* emit({
+              ...(yield* buildEventBase({
+                threadId: context.session.threadId,
+                turnId: context.activeTurnId,
+                requestId,
+                raw: record,
+              })),
+              type: "user-input.requested",
+              payload: { questions: [question] },
+            });
+            return;
+          }
+        }
+
+        yield* cancelUiRequest(context, requestId);
         yield* handleWarning(
           context,
-          "A pi extension requested interactive UI; the request was cancelled (not supported here yet).",
+          `A pi extension requested interactive UI ('${method || "unknown"}') that this client cannot render; the request was cancelled.`,
           record,
         );
       });
@@ -768,6 +833,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           compactionItemId: undefined,
           model: undefined,
           thinkingLevel: undefined,
+          pendingUiRequests: new Map(),
         };
         sessions.set(input.threadId, context);
 
@@ -883,13 +949,48 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     const respondToUserInput: ProviderAdapterShape<ProviderAdapterError>["respondToUserInput"] = (
       threadId,
       requestId,
+      answers,
     ) =>
       Effect.gen(function* () {
-        yield* requireContext(threadId);
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "respondToUserInput",
-          detail: `pi extension UI requests are auto-cancelled; no pending request '${requestId}'.`,
+        const context = yield* requireContext(threadId);
+        const kind = context.pendingUiRequests.get(requestId);
+        if (kind === undefined) {
+          // pi auto-resolves dialogs once their timeout elapses, so a late
+          // answer has nothing left to answer.
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "respondToUserInput",
+            detail: `No pending pi extension UI request '${requestId}'; it may have timed out.`,
+          });
+        }
+        context.pendingUiRequests.delete(requestId);
+
+        // Questions carry the request id, so the answer is keyed by it.
+        const answer = answers[requestId];
+        const label = Array.isArray(answer)
+          ? answer.find((entry): entry is string => typeof entry === "string")
+          : typeof answer === "string"
+            ? answer
+            : undefined;
+
+        yield* context.rpc
+          .send(
+            label === undefined
+              ? { type: "extension_ui_response", id: requestId, cancelled: true }
+              : kind === "confirm"
+                ? { type: "extension_ui_response", id: requestId, confirmed: label === CONFIRM_YES }
+                : { type: "extension_ui_response", id: requestId, value: label },
+          )
+          .pipe(Effect.mapError((cause) => rpcError("extension_ui_response", cause)));
+
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId,
+            turnId: context.activeTurnId,
+            requestId,
+          })),
+          type: "user-input.resolved",
+          payload: { answers },
         });
       });
 
