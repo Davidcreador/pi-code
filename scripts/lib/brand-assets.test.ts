@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - Tests inspect the tracked icon source files directly.
+import * as NodeFS from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -9,7 +11,24 @@ import {
   resolveWebIconOverrides,
 } from "./brand-assets.ts";
 
+const PI_MARK_PATH = "M20 32H108V48H92V104H76V48H52V104H36V48H20V32Z";
+
+const PI_MARK_ASSETS = [
+  "../../assets/dev/app-icon.icon/Assets/text.svg",
+  "../../assets/nightly/app-icon.icon/Assets/text.svg",
+  "../../assets/prod/app-icon.icon/Assets/text.svg",
+  "../../assets/prod/logo.svg",
+] as const;
+
 describe("brand-assets", () => {
+  it("uses only the Pi mark for every app icon", () => {
+    for (const asset of PI_MARK_ASSETS) {
+      const source = NodeFS.readFileSync(new URL(asset, import.meta.url), "utf8");
+      const paths = [...source.matchAll(/<path\b[^>]*\bd="([^"]+)"/g)].map((match) => match[1]);
+      expect(paths).toEqual([PI_MARK_PATH]);
+    }
+  });
+
   it("maps production web assets into the server package", () => {
     expect(resolveWebIconOverrides("production", "dist/client")).toEqual([
       {
