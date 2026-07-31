@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off
+import { rm, rmSync } from "node:fs";
+
 import type { AssetResource } from "@t3tools/contracts";
 import {
   AssetAttachmentNotFoundError,
@@ -21,12 +24,14 @@ import {
 } from "@t3tools/shared/filePreview";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
 import * as Clock from "effect/Clock";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import {
   base64UrlDecodeUtf8,
@@ -44,6 +49,52 @@ export const ASSET_ROUTE_PREFIX = "/api/assets";
 
 const SIGNING_SECRET_NAME = "asset-access-signing-key";
 const ASSET_TOKEN_TTL_MS = 60 * 60 * 1000;
+export const PI_EXPORT_ARTIFACT_LIMIT = 32;
+
+interface ExportArtifact {
+  readonly canonicalPath: string;
+  readonly directory: string;
+  readonly fileName: string;
+  readonly expiresAt: number;
+}
+
+const exportArtifacts = new Map<string, ExportArtifact>();
+const pendingExportCleanup = new Set<string>();
+const exportArtifactLock = Semaphore.makeUnsafe(1);
+
+function removeExportArtifact(handle: string, artifact: ExportArtifact): void {
+  if (exportArtifacts.get(handle) !== artifact) return;
+  rm(artifact.directory, { recursive: true, force: true }, (error) => {
+    if (error === null && exportArtifacts.get(handle) === artifact) {
+      exportArtifacts.delete(handle);
+    }
+  });
+}
+
+function retryPendingExportCleanup(directory: string): void {
+  rm(directory, { recursive: true, force: true }, (error) => {
+    if (error === null) pendingExportCleanup.delete(directory);
+  });
+}
+
+const exportCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [handle, artifact] of exportArtifacts) {
+    if (artifact.expiresAt <= now) removeExportArtifact(handle, artifact);
+  }
+  for (const directory of pendingExportCleanup) retryPendingExportCleanup(directory);
+}, 60_000);
+exportCleanupTimer.unref();
+
+process.once("exit", () => {
+  for (const artifact of exportArtifacts.values()) {
+    rmSync(artifact.directory, { recursive: true, force: true });
+  }
+  for (const directory of pendingExportCleanup) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 const PREVIEW_ASSET_EXTENSIONS = new Set([
   ...WORKSPACE_BROWSER_PREVIEW_EXTENSIONS,
   ...WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
@@ -84,6 +135,12 @@ const AssetClaimsSchema = Schema.Union([
     relativePath: Schema.NullOr(Schema.String),
     expiresAt: Schema.Number,
   }),
+  Schema.Struct({
+    version: Schema.Literal(1),
+    kind: Schema.Literal("pi-html-export"),
+    handle: Schema.String,
+    expiresAt: Schema.Number,
+  }),
 ]);
 type AssetClaims = typeof AssetClaimsSchema.Type;
 
@@ -91,7 +148,11 @@ const AssetClaimsJson = Schema.fromJsonString(AssetClaimsSchema);
 const decodeAssetClaims = Schema.decodeUnknownOption(AssetClaimsJson);
 const encodeAssetClaims = Schema.encodeSync(AssetClaimsJson);
 
-export type ResolvedAsset = { readonly kind: "file"; readonly path: string };
+export type ResolvedAsset = {
+  readonly kind: "file";
+  readonly path: string;
+  readonly downloadName?: string;
+};
 
 function decodeClaims(encodedPayload: string): AssetClaims | null {
   try {
@@ -347,6 +408,83 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   };
 });
 
+export const issuePiExportAssetUrl = (input: {
+  readonly canonicalPath: string;
+  readonly fileName: string;
+}) => {
+  let unregisteredDirectory: string | undefined;
+  return Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    if (
+      input.fileName !== path.basename(input.fileName) ||
+      path.extname(input.fileName).toLowerCase() !== ".html"
+    ) {
+      return yield* Effect.fail("Invalid Pi export filename.");
+    }
+    const canonicalPath = yield* fileSystem.realPath(input.canonicalPath);
+    if (canonicalPath !== input.canonicalPath || path.basename(canonicalPath) !== input.fileName) {
+      return yield* Effect.fail("Invalid Pi export path.");
+    }
+    unregisteredDirectory = path.dirname(canonicalPath);
+    const info = yield* fileSystem.stat(canonicalPath);
+    if (info.type !== "File") return yield* Effect.fail("Invalid Pi export file.");
+
+    const crypto = yield* Crypto.Crypto;
+    const handle = yield* crypto.randomUUIDv4;
+    const expiresAt = (yield* Clock.currentTimeMillis) + ASSET_TOKEN_TTL_MS;
+    const artifact = {
+      canonicalPath,
+      directory: path.dirname(canonicalPath),
+      fileName: input.fileName,
+      expiresAt,
+    } satisfies ExportArtifact;
+    const claims: AssetClaims = { version: 1, kind: "pi-html-export", handle, expiresAt };
+    const secretStore = yield* ServerSecretStore.ServerSecretStore;
+    const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32);
+    const encodedPayload = base64UrlEncode(encodeAssetClaims(claims));
+    const token = `${encodedPayload}.${signPayload(encodedPayload, signingSecret)}`;
+
+    yield* exportArtifactLock.withPermit(
+      Effect.gen(function* () {
+        while (exportArtifacts.size >= PI_EXPORT_ARTIFACT_LIMIT) {
+          const oldest = exportArtifacts.entries().next().value;
+          if (oldest === undefined) break;
+          const [oldestHandle, oldestArtifact] = oldest;
+          yield* fileSystem.remove(oldestArtifact.directory, { recursive: true, force: true });
+          exportArtifacts.delete(oldestHandle);
+        }
+        exportArtifacts.set(handle, artifact);
+        unregisteredDirectory = undefined;
+      }),
+    );
+    return {
+      handle,
+      fileName: input.fileName,
+      relativeUrl: `${ASSET_ROUTE_PREFIX}/${token}/${encodeURIComponent(input.fileName)}`,
+      expiresAt,
+    };
+  }).pipe(
+    Effect.ensuring(
+      Effect.suspend(() => {
+        const directory = unregisteredDirectory;
+        return directory === undefined
+          ? Effect.void
+          : FileSystem.FileSystem.pipe(
+              Effect.flatMap((fileSystem) =>
+                fileSystem.remove(directory, { recursive: true, force: true }),
+              ),
+              Effect.catch(() =>
+                Effect.sync(() => {
+                  pendingExportCleanup.add(directory);
+                }),
+              ),
+            );
+      }),
+    ),
+  );
+};
+
 export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
   token: string,
   relativePath: string,
@@ -364,6 +502,30 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
 
   const claims = decodeClaims(encodedPayload);
   if (!claims || claims.expiresAt <= (yield* Clock.currentTimeMillis)) return null;
+
+  if (claims.kind === "pi-html-export") {
+    const artifact = exportArtifacts.get(claims.handle);
+    if (!artifact || artifact.expiresAt !== claims.expiresAt) return null;
+    const decodedPath = decodeRelativePath(relativePath);
+    if (decodedPath !== artifact.fileName) return null;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const canonicalPath = yield* optionOnNotFound(fileSystem.realPath(artifact.canonicalPath)).pipe(
+      Effect.orElseSucceed(() => Option.none()),
+    );
+    const info = yield* optionOnNotFound(fileSystem.stat(artifact.canonicalPath)).pipe(
+      Effect.orElseSucceed(() => Option.none()),
+    );
+    return Option.isSome(canonicalPath) &&
+      canonicalPath.value === artifact.canonicalPath &&
+      Option.isSome(info) &&
+      info.value.type === "File"
+      ? ({
+          kind: "file",
+          path: artifact.canonicalPath,
+          downloadName: artifact.fileName,
+        } satisfies ResolvedAsset)
+      : null;
+  }
 
   if (claims.kind === "attachment") {
     const config = yield* ServerConfig.ServerConfig;

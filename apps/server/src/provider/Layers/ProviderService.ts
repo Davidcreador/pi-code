@@ -48,6 +48,7 @@ import {
 } from "../../observability/Metrics.ts";
 import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type { PiNativeAdapterShape } from "../Services/PiNativeAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
@@ -499,6 +500,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       threadId: input.threadId,
       isActive: true,
     } as const;
+  });
+
+  const resolvePiNativeSession = Effect.fn("resolvePiNativeSession")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly operation: string;
+    readonly allowRecovery: boolean;
+  }) {
+    const routed = yield* resolveRoutableSession(input);
+    if (routed.adapter.piNative === undefined) {
+      return yield* toValidationError(
+        input.operation,
+        `Provider '${routed.adapter.provider}' does not support Pi-native operations.`,
+      );
+    }
+    return { ...routed, piNative: routed.adapter.piNative };
   });
 
   const stopStaleSessionsForThread = Effect.fn("stopStaleSessionsForThread")(function* (input: {
@@ -990,6 +1006,259 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
+  const withPiSessionLock: ProviderServiceMethod<"withPiSessionLock"> = (threadId, effect) =>
+    resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.withPiSessionLock",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.withSessionLock(threadId, effect)));
+
+  const getPiSessionTree: ProviderServiceMethod<"getPiSessionTree"> = Effect.fn("getPiSessionTree")(
+    function* (threadId) {
+      const routed = yield* resolvePiNativeSession({
+        threadId,
+        operation: "ProviderService.getPiSessionTree",
+        allowRecovery: true,
+      });
+      return yield* routed.piNative.getSessionTree(threadId);
+    },
+  );
+
+  const getPiActiveTranscript: ProviderServiceMethod<"getPiActiveTranscript"> = Effect.fn(
+    "getPiActiveTranscript",
+  )(function* (threadId) {
+    const routed = yield* resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.getPiActiveTranscript",
+      allowRecovery: true,
+    });
+    return yield* routed.piNative.getActiveTranscript(threadId);
+  });
+
+  const navigatePiSessionTree: ProviderServiceMethod<"navigatePiSessionTree"> = Effect.fn(
+    "navigatePiSessionTree",
+  )(function* (input) {
+    const routed = yield* resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.navigatePiSessionTree",
+      allowRecovery: true,
+    });
+    return yield* routed.piNative.navigateSessionTree(input);
+  });
+
+  const abortPiBranchSummary: ProviderServiceMethod<"abortPiBranchSummary"> = Effect.fn(
+    "abortPiBranchSummary",
+  )(function* (threadId) {
+    const routed = yield* resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.abortPiBranchSummary",
+      allowRecovery: true,
+    });
+    yield* routed.piNative.abortBranchSummary(threadId);
+  });
+
+  const setPiEntryLabel: ProviderServiceMethod<"setPiEntryLabel"> = Effect.fn("setPiEntryLabel")(
+    function* (input) {
+      const routed = yield* resolvePiNativeSession({
+        threadId: input.threadId,
+        operation: "ProviderService.setPiEntryLabel",
+        allowRecovery: true,
+      });
+      yield* routed.piNative.setEntryLabel(input);
+    },
+  );
+
+  const reloadPiResources: ProviderServiceMethod<"reloadPiResources"> = Effect.fn(
+    "reloadPiResources",
+  )(function* (threadId) {
+    const routed = yield* resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.reloadPiResources",
+      allowRecovery: true,
+    });
+    yield* routed.piNative.reloadResources(threadId);
+  });
+
+  const compactPiSession: ProviderServiceMethod<"compactPiSession"> = Effect.fn("compactPiSession")(
+    function* (input) {
+      const routed = yield* resolvePiNativeSession({
+        threadId: input.threadId,
+        operation: "ProviderService.compactPiSession",
+        allowRecovery: true,
+      });
+      return yield* routed.piNative.compactSession(input);
+    },
+  );
+
+  const getPiSessionStateAndStats: ProviderServiceMethod<"getPiSessionStateAndStats"> = Effect.fn(
+    "getPiSessionStateAndStats",
+  )(function* (threadId) {
+    const routed = yield* resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.getPiSessionStateAndStats",
+      allowRecovery: true,
+    });
+    return yield* routed.piNative.getSessionStateAndStats(threadId);
+  });
+
+  const setPiSessionName: ProviderServiceMethod<"setPiSessionName"> = Effect.fn("setPiSessionName")(
+    function* (input) {
+      const routed = yield* resolvePiNativeSession({
+        threadId: input.threadId,
+        operation: "ProviderService.setPiSessionName",
+        allowRecovery: true,
+      });
+      yield* routed.piNative.setSessionName(input);
+    },
+  );
+
+  const getPiLastAssistantText: ProviderServiceMethod<"getPiLastAssistantText"> = Effect.fn(
+    "getPiLastAssistantText",
+  )(function* (threadId) {
+    const routed = yield* resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.getPiLastAssistantText",
+      allowRecovery: true,
+    });
+    return yield* routed.piNative.getLastAssistantText(threadId);
+  });
+
+  const exportPiSessionHtml: ProviderServiceMethod<"exportPiSessionHtml"> = Effect.fn(
+    "exportPiSessionHtml",
+  )(function* (input) {
+    const routed = yield* resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.exportPiSessionHtml",
+      allowRecovery: true,
+    });
+    return yield* routed.piNative.exportSessionHtml(input);
+  });
+
+  const getPiSettings: ProviderServiceMethod<"getPiSettings"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.getPiSettings",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.getSettings(input)));
+  const updatePiSettings: ProviderServiceMethod<"updatePiSettings"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.updatePiSettings",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.updateSettings(input)));
+  const getPiScopedModels: ProviderServiceMethod<"getPiScopedModels"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.getPiScopedModels",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.getScopedModels(input)));
+  const updatePiScopedModels: ProviderServiceMethod<"updatePiScopedModels"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.updatePiScopedModels",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.updateScopedModels(input)));
+  const listPiResumeSessions: ProviderServiceMethod<"listPiResumeSessions"> = (threadId) =>
+    resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.listPiResumeSessions",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.listResumeSessions(threadId)));
+  const runPiSessionMutation = Effect.fn("runPiSessionMutation")(function* (
+    threadId: ThreadId,
+    operation: string,
+    mutate: (
+      piNative: PiNativeAdapterShape<ProviderAdapterError>,
+    ) => ReturnType<PiNativeAdapterShape<ProviderAdapterError>["cloneSession"]>,
+  ) {
+    const routed = yield* resolvePiNativeSession({ threadId, operation, allowRecovery: true });
+    const result = yield* mutate(routed.piNative);
+    if (!result.cancelled) {
+      const active = (yield* routed.adapter.listSessions()).find(
+        (session) => session.threadId === threadId,
+      );
+      if (active !== undefined)
+        yield* upsertSessionBinding({ ...active, providerInstanceId: routed.instanceId }, threadId);
+    }
+    return result;
+  });
+  const resumePiSession: ProviderServiceMethod<"resumePiSession"> = (input) =>
+    runPiSessionMutation(input.threadId, "ProviderService.resumePiSession", (piNative) =>
+      piNative.resumeSession(input),
+    );
+  const importPiSession: ProviderServiceMethod<"importPiSession"> = (input) =>
+    runPiSessionMutation(input.threadId, "ProviderService.importPiSession", (piNative) =>
+      piNative.importSession(input),
+    );
+  const forkPiSession: ProviderServiceMethod<"forkPiSession"> = (input) =>
+    runPiSessionMutation(input.threadId, "ProviderService.forkPiSession", (piNative) =>
+      piNative.forkSession(input),
+    );
+  const clonePiSession: ProviderServiceMethod<"clonePiSession"> = (threadId) =>
+    runPiSessionMutation(threadId, "ProviderService.clonePiSession", (piNative) =>
+      piNative.cloneSession(threadId),
+    );
+  const getPiTrust: ProviderServiceMethod<"getPiTrust"> = (threadId) =>
+    resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.getPiTrust",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.getTrust(threadId)));
+  const setPiTrust: ProviderServiceMethod<"setPiTrust"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.setPiTrust",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.setTrust(input)));
+  const getPiChangelog: ProviderServiceMethod<"getPiChangelog"> = (threadId) =>
+    resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.getPiChangelog",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.getChangelog(threadId)));
+  const getPiAuthState: ProviderServiceMethod<"getPiAuthState"> = (threadId) =>
+    resolvePiNativeSession({
+      threadId,
+      operation: "ProviderService.getPiAuthState",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.getAuthState(threadId)));
+  const beginPiAuthLogin: ProviderServiceMethod<"beginPiAuthLogin"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.beginPiAuthLogin",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.beginAuthLogin(input)));
+  const getPiAuthFlow: ProviderServiceMethod<"getPiAuthFlow"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.getPiAuthFlow",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.getAuthFlow(input)));
+  const respondPiAuthFlow: ProviderServiceMethod<"respondPiAuthFlow"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.respondPiAuthFlow",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.respondAuthFlow(input)));
+  const cancelPiAuthFlow: ProviderServiceMethod<"cancelPiAuthFlow"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.cancelPiAuthFlow",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.cancelAuthFlow(input)));
+  const logoutPiAuth: ProviderServiceMethod<"logoutPiAuth"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.logoutPiAuth",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.logoutAuth(input)));
+  const sharePiSession: ProviderServiceMethod<"sharePiSession"> = (input) =>
+    resolvePiNativeSession({
+      threadId: input.threadId,
+      operation: "ProviderService.sharePiSession",
+      allowRecovery: true,
+    }).pipe(Effect.flatMap((routed) => routed.piNative.shareSession(input)));
+
   const rollbackConversation: ProviderServiceMethod<"rollbackConversation"> = Effect.fn(
     "rollbackConversation",
   )(function* (rawInput) {
@@ -1102,6 +1371,37 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,
+    withPiSessionLock,
+    getPiSessionTree,
+    getPiActiveTranscript,
+    navigatePiSessionTree,
+    abortPiBranchSummary,
+    setPiEntryLabel,
+    reloadPiResources,
+    compactPiSession,
+    getPiSessionStateAndStats,
+    setPiSessionName,
+    getPiLastAssistantText,
+    exportPiSessionHtml,
+    getPiSettings,
+    updatePiSettings,
+    getPiScopedModels,
+    updatePiScopedModels,
+    listPiResumeSessions,
+    resumePiSession,
+    importPiSession,
+    forkPiSession,
+    clonePiSession,
+    getPiTrust,
+    setPiTrust,
+    getPiChangelog,
+    getPiAuthState,
+    beginPiAuthLogin,
+    getPiAuthFlow,
+    respondPiAuthFlow,
+    cancelPiAuthFlow,
+    logoutPiAuth,
+    sharePiSession,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

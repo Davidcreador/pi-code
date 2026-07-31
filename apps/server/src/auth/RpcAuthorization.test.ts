@@ -3,6 +3,7 @@ import {
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  PI_NATIVE_WS_METHODS,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -28,6 +29,27 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.subscribeBackgroundPolicy)).toBe(
       AuthOrchestrationReadScope,
     );
+  });
+
+  it("separates Pi-native reads from operations", () => {
+    for (const method of [
+      PI_NATIVE_WS_METHODS.getTree,
+      PI_NATIVE_WS_METHODS.getStateAndStats,
+      PI_NATIVE_WS_METHODS.getLastAssistantText,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
+    for (const method of [
+      PI_NATIVE_WS_METHODS.navigateTree,
+      PI_NATIVE_WS_METHODS.abortBranchSummary,
+      PI_NATIVE_WS_METHODS.setEntryLabel,
+      PI_NATIVE_WS_METHODS.reload,
+      PI_NATIVE_WS_METHODS.compact,
+      PI_NATIVE_WS_METHODS.setSessionName,
+      PI_NATIVE_WS_METHODS.exportHtml,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    }
   });
 
   it("allows relay status reads without granting relay installation access", () => {

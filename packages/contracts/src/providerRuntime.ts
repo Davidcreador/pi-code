@@ -447,6 +447,9 @@ export const UserInputQuestion = Schema.Struct({
   multiSelect: Schema.optional(Schema.Boolean).pipe(
     Schema.withConstructorDefault(Effect.succeed(false)),
   ),
+  placeholder: Schema.optional(Schema.String),
+  defaultAnswer: Schema.optional(Schema.String),
+  answerMode: Schema.optional(Schema.Literals(["trimmed", "verbatim"])),
 });
 export type UserInputQuestion = typeof UserInputQuestion.Type;
 

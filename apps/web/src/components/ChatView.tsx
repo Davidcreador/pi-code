@@ -71,7 +71,8 @@ import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import {
   collapseExpandedComposerCursor,
-  parseStandaloneComposerSlashCommand,
+  composerSubmissionRequiresProvider,
+  resolveComposerSubmissionIntent,
 } from "../composer-logic";
 import {
   derivePendingApprovals,
@@ -223,6 +224,9 @@ import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
+import { PiManagementCommandDialog } from "./PiManagementCommandDialog";
+import { PiNativeCommandDialog } from "./PiNativeCommandDialog";
+import { isPiManagementCommand, type NativeSlashCommand } from "../nativeSlashCommands";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { ChatHeader } from "./chat/ChatHeader";
@@ -1169,6 +1173,7 @@ function ChatViewContent(props: ChatViewProps) {
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
+  const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, { reportFailure: false });
   const respondToThreadApproval = useAtomCommand(threadEnvironment.respondToApproval, {
     reportFailure: false,
   });
@@ -1298,6 +1303,7 @@ function ChatViewContent(props: ChatViewProps) {
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
   const [pullRequestDialogState, setPullRequestDialogState] =
     useState<PullRequestDialogState | null>(null);
+  const [nativeSlashCommand, setNativeSlashCommand] = useState<NativeSlashCommand | null>(null);
   const [terminalUiLaunchContext, setTerminalUiLaunchContext] =
     useState<TerminalLaunchContext | null>(null);
   const [attachmentPreviewHandoffByMessageId, setAttachmentPreviewHandoffByMessageId] = useState<
@@ -4483,6 +4489,61 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
+  const handleNativeSlashCommand = useCallback(
+    (command: NativeSlashCommand) => {
+      if (command === "model") {
+        composerRef.current?.openModelPicker();
+        return;
+      }
+      if (command === "plan" || command === "default") {
+        handleInteractionModeChange(command);
+        return;
+      }
+      if (command === "hotkeys") {
+        void navigate({ to: "/settings/keybindings" });
+        return;
+      }
+      setNativeSlashCommand(command);
+    },
+    [handleInteractionModeChange, navigate],
+  );
+
+  const closeNativeSlashCommand = useCallback(() => setNativeSlashCommand(null), []);
+  const handleNativeNewThread = useCallback(() => {
+    if (activeProject) {
+      void handleNewThread(scopeProjectRef(activeProject.environmentId, activeProject.id));
+    }
+  }, [activeProject, handleNewThread]);
+  const handleNativeQuit = useCallback(async () => {
+    if (window.desktopBridge?.quitApp) {
+      await window.desktopBridge.quitApp();
+      return;
+    }
+    if (!activeThread) return;
+    const result = await stopThreadSession({
+      environmentId,
+      input: { threadId: activeThread.id },
+    });
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      throw error instanceof Error ? error : new Error("Failed to stop the session.");
+    }
+  }, [activeThread, environmentId, stopThreadSession]);
+
+  const restoreComposerEditorText = useCallback(
+    (text: string) => {
+      promptRef.current = text;
+      setComposerDraftPrompt(composerDraftTarget, text);
+      composerRef.current?.resetCursorState({
+        cursor: collapseExpandedComposerCursor(text, text.length),
+        prompt: text,
+        detectTrigger: true,
+      });
+      scheduleComposerFocus();
+    },
+    [composerDraftTarget, composerRef, scheduleComposerFocus, setComposerDraftPrompt],
+  );
+
   const onSend = async (e?: { preventDefault: () => void }) => {
     e?.preventDefault();
     if (
@@ -4498,8 +4559,9 @@ function ChatViewContent(props: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
+    const promptForSend = promptRef.current;
     const sendCtx = composerRef.current?.getSendContext();
-    if (!sendCtx?.providerAvailable) return;
+    if (!sendCtx) return;
     const {
       images: composerImages,
       terminalContexts: composerTerminalContexts,
@@ -4512,7 +4574,6 @@ function ChatViewContent(props: ChatViewProps) {
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
     } = sendCtx;
-    const promptForSend = promptRef.current;
     const {
       trimmedPrompt: trimmed,
       sendableTerminalContexts: sendableComposerTerminalContexts,
@@ -4527,7 +4588,28 @@ function ChatViewContent(props: ChatViewProps) {
         composerPreviewAnnotations.length +
         composerReviewComments.length,
     });
-    if (showPlanFollowUpPrompt && activeProposedPlan) {
+    const submissionIntent = resolveComposerSubmissionIntent(
+      trimmed,
+      showPlanFollowUpPrompt && activeProposedPlan !== null,
+    );
+    const hasAttachedContext =
+      composerImages.length > 0 ||
+      sendableComposerTerminalContexts.length > 0 ||
+      composerElementContexts.length > 0 ||
+      composerPreviewAnnotations.length > 0 ||
+      composerReviewComments.length > 0;
+    if (
+      submissionIntent.type === "native-command" &&
+      !composerSubmissionRequiresProvider(trimmed, hasAttachedContext)
+    ) {
+      handleNativeSlashCommand(submissionIntent.command);
+      promptRef.current = "";
+      setComposerDraftPrompt(composerDraftTarget, "");
+      composerRef.current?.resetCursorState();
+      return;
+    }
+    if (!sendCtx.providerAvailable) return;
+    if (submissionIntent.type === "plan-follow-up" && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
         planMarkdown: activeProposedPlan.planMarkdown,
@@ -4539,21 +4621,6 @@ function ChatViewContent(props: ChatViewProps) {
         text: followUp.text,
         interactionMode: followUp.interactionMode,
       });
-      return;
-    }
-    const standaloneSlashCommand =
-      composerImages.length === 0 &&
-      sendableComposerTerminalContexts.length === 0 &&
-      composerElementContexts.length === 0 &&
-      composerPreviewAnnotations.length === 0 &&
-      composerReviewComments.length === 0
-        ? parseStandaloneComposerSlashCommand(trimmed)
-        : null;
-    if (standaloneSlashCommand) {
-      handleInteractionModeChange(standaloneSlashCommand);
-      promptRef.current = "";
-      clearComposerDraftContent(composerDraftTarget);
-      composerRef.current?.resetCursorState();
       return;
     }
     if (!hasSendableContent) {
@@ -5890,6 +5957,7 @@ function ChatViewContent(props: ChatViewProps) {
                             composerTerminalContextsRef={composerTerminalContextsRef}
                             composerElementContextsRef={composerElementContextsRef}
                             onSend={onSend}
+                            onNativeSlashCommand={handleNativeSlashCommand}
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
                             onRespondToApproval={onRespondToApproval}
@@ -6095,6 +6163,28 @@ function ChatViewContent(props: ChatViewProps) {
             {rightPanelContent}
           </RightPanelTabs>
         </RightPanelSheet>
+      ) : null}
+
+      {activeThread && nativeSlashCommand ? (
+        isPiManagementCommand(nativeSlashCommand) ? (
+          <PiManagementCommandDialog
+            command={nativeSlashCommand}
+            environmentId={environmentId}
+            threadId={activeThread.id}
+            onClose={closeNativeSlashCommand}
+            onRestoreEditorText={restoreComposerEditorText}
+          />
+        ) : (
+          <PiNativeCommandDialog
+            command={nativeSlashCommand}
+            environmentId={environmentId}
+            threadId={activeThread.id}
+            onClose={closeNativeSlashCommand}
+            onNewThread={handleNativeNewThread}
+            onQuit={handleNativeQuit}
+            onRestoreEditorText={restoreComposerEditorText}
+          />
+        )
       ) : null}
 
       {expandedImage && (

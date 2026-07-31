@@ -62,6 +62,7 @@ import {
   OrchestrationRpcSchemas,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { PiNativeRpcs } from "./piNative.ts";
 import {
   RelayClientInstallFailedError,
   RelayClientInstallProgressEventSchema,
@@ -754,6 +755,35 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  PiNativeRpcs.getTree,
+  PiNativeRpcs.navigateTree,
+  PiNativeRpcs.abortBranchSummary,
+  PiNativeRpcs.setEntryLabel,
+  PiNativeRpcs.reload,
+  PiNativeRpcs.compact,
+  PiNativeRpcs.getStateAndStats,
+  PiNativeRpcs.setSessionName,
+  PiNativeRpcs.getLastAssistantText,
+  PiNativeRpcs.exportHtml,
+  PiNativeRpcs.getSettings,
+  PiNativeRpcs.updateSettings,
+  PiNativeRpcs.getScopedModels,
+  PiNativeRpcs.updateScopedModels,
+  PiNativeRpcs.listResumeSessions,
+  PiNativeRpcs.resume,
+  PiNativeRpcs.importSession,
+  PiNativeRpcs.fork,
+  PiNativeRpcs.clone,
+  PiNativeRpcs.getTrust,
+  PiNativeRpcs.setTrust,
+  PiNativeRpcs.getChangelog,
+  PiNativeRpcs.getAuthState,
+  PiNativeRpcs.beginAuthLogin,
+  PiNativeRpcs.getAuthFlow,
+  PiNativeRpcs.respondAuthFlow,
+  PiNativeRpcs.cancelAuthFlow,
+  PiNativeRpcs.logout,
+  PiNativeRpcs.share,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

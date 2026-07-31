@@ -4,6 +4,8 @@ import {
   OrchestrationMessage,
   OrchestrationSession,
   OrchestrationThread,
+  THREAD_TRANSCRIPT_MAX_ACTIVITIES,
+  THREAD_TRANSCRIPT_MAX_MESSAGES,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -29,11 +31,11 @@ import {
   ThreadUnsnoozedPayload,
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
+  ThreadTranscriptReplacedPayload,
   ThreadTurnDiffCompletedPayload,
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
-const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
 
 function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
@@ -486,7 +488,7 @@ export function projectEvent(
                 : entry,
             )
           : [...thread.messages, message];
-        const cappedMessages = messages.slice(-MAX_THREAD_MESSAGES);
+        const cappedMessages = messages.slice(-THREAD_TRANSCRIPT_MAX_MESSAGES);
 
         return {
           ...nextBase,
@@ -667,6 +669,30 @@ export function projectEvent(
         };
       });
 
+    case "thread.transcript-replaced":
+      return decodeForEvent(
+        ThreadTranscriptReplacedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              messages: payload.messages.slice(-THREAD_TRANSCRIPT_MAX_MESSAGES),
+              activities: payload.activities.slice(-THREAD_TRANSCRIPT_MAX_ACTIVITIES),
+              ...(payload.resetDerivedState
+                ? { proposedPlans: [], checkpoints: [], latestTurn: null }
+                : {}),
+              updatedAt: payload.updatedAt,
+            }),
+          };
+        }),
+      );
+
     case "thread.reverted":
       return decodeForEvent(ThreadRevertedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => {
@@ -684,7 +710,7 @@ export function projectEvent(
             thread.messages,
             retainedTurnIds,
             payload.turnCount,
-          ).slice(-MAX_THREAD_MESSAGES);
+          ).slice(-THREAD_TRANSCRIPT_MAX_MESSAGES);
           const proposedPlans = retainThreadProposedPlansAfterRevert(
             thread.proposedPlans,
             retainedTurnIds,
@@ -736,7 +762,7 @@ export function projectEvent(
             payload.activity,
           ]
             .toSorted(compareThreadActivities)
-            .slice(-500);
+            .slice(-THREAD_TRANSCRIPT_MAX_ACTIVITIES);
 
           return {
             ...nextBase,

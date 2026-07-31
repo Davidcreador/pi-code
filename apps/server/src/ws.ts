@@ -1,4 +1,5 @@
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -30,6 +31,9 @@ import {
   OrchestrationGetSnapshotError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
+  PI_NATIVE_WS_METHODS,
+  PiNativeError,
+  type PiNativeSessionMutationResult,
   type ProjectId,
   type ProjectEntriesFailure,
   type ProjectFileFailure,
@@ -75,7 +79,13 @@ import {
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
+import {
+  hasProjectedPiTreeNavigationWork,
+  navigatePiTreeAndReplaceTranscript,
+  replacePiTranscript,
+} from "./provider/piTreeNavigation.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -83,7 +93,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
-import { issueAssetUrl } from "./assets/AssetAccess.ts";
+import { issueAssetUrl, issuePiExportAssetUrl } from "./assets/AssetAccess.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
@@ -355,6 +365,14 @@ const makeWsRpcLayer = (
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const providerService = yield* Effect.contextWith<
+        never,
+        ProviderService.ProviderService["Service"] | undefined,
+        never,
+        never
+      >((context) =>
+        Effect.succeed(Context.getOrUndefined(context, ProviderService.ProviderService)),
+      );
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
@@ -454,6 +472,25 @@ const makeWsRpcLayer = (
           authorizeEffect(requiredScopeForRpcMethod(method), effect),
           traceAttributes,
         );
+      const toPiNativeError = (operation: string, cause: unknown) =>
+        new PiNativeError({
+          operation,
+          message: cause instanceof Error ? cause.message : String(cause),
+        });
+      const runPiNative = <A, E, R>(
+        operation: string,
+        request: (service: ProviderService.ProviderService["Service"]) => Effect.Effect<A, E, R>,
+      ) =>
+        providerService === undefined
+          ? Effect.fail(
+              new PiNativeError({
+                operation,
+                message: "Pi-native provider service is unavailable.",
+              }),
+            )
+          : request(providerService).pipe(
+              Effect.mapError((cause) => toPiNativeError(operation, cause)),
+            );
       const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
         isOrchestrationDispatchCommandError(cause)
           ? cause
@@ -1006,7 +1043,264 @@ const makeWsRpcLayer = (
           .refreshStatus(cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
+      const mutatePiSessionAndReplaceTranscript = <E, R>(
+        threadId: ThreadId,
+        operation: string,
+        mutate: (
+          service: ProviderService.ProviderService["Service"],
+        ) => Effect.Effect<PiNativeSessionMutationResult, E, R>,
+      ) =>
+        runPiNative(operation, (service) =>
+          service.withPiSessionLock(
+            threadId,
+            Effect.gen(function* () {
+              const projected = yield* projectionSnapshotQuery.getThreadDetailById(threadId);
+              if (hasProjectedPiTreeNavigationWork(Option.getOrUndefined(projected))) {
+                return yield* new PiNativeError({
+                  operation,
+                  message:
+                    "Wait for the queued or current response to finish before switching sessions.",
+                });
+              }
+              const result = yield* mutate(service);
+              if (result.cancelled) return result;
+              if (result.model && Option.isSome(projected)) {
+                yield* dispatchNormalizedCommand({
+                  type: "thread.meta.update",
+                  commandId: yield* serverCommandId(`pi-${operation}-model-adopt`),
+                  threadId,
+                  modelSelection: {
+                    instanceId: projected.value.modelSelection.instanceId,
+                    model: `${result.model.provider}/${result.model.id}`,
+                    options: result.thinkingLevel
+                      ? [{ id: "effort", value: result.thinkingLevel }]
+                      : [],
+                  },
+                });
+              }
+              const transcript = yield* service.getPiActiveTranscript(threadId);
+              yield* replacePiTranscript(threadId, transcript, true, {
+                dispatch: dispatchNormalizedCommand,
+                commandId: serverCommandId(`pi-${operation}-transcript-replace`),
+                createdAt: nowIso,
+              });
+              return result;
+            }),
+          ),
+        );
+
       return WsRpcGroup.of({
+        [PI_NATIVE_WS_METHODS.getTree]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.getTree,
+            runPiNative("getTree", (service) =>
+              service.withPiSessionLock(threadId, service.getPiSessionTree(threadId)),
+            ),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.navigateTree]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.navigateTree,
+            runPiNative("navigateTree", (service) =>
+              service.withPiSessionLock(
+                input.threadId,
+                Effect.gen(function* () {
+                  const tree = yield* service.getPiSessionTree(input.threadId);
+                  return yield* navigatePiTreeAndReplaceTranscript(input, {
+                    currentLeafId: tree.leafId,
+                    navigate: (request) =>
+                      Effect.gen(function* () {
+                        const projected = yield* projectionSnapshotQuery.getThreadDetailById(
+                          request.threadId,
+                        );
+                        const thread = Option.getOrUndefined(projected);
+                        if (hasProjectedPiTreeNavigationWork(thread)) {
+                          return yield* new PiNativeError({
+                            operation: "navigateTree",
+                            message:
+                              "Wait for the queued or current response to finish before navigating.",
+                          });
+                        }
+                        return yield* service.navigatePiSessionTree(request);
+                      }),
+                    readTranscript: () => service.getPiActiveTranscript(input.threadId),
+                    dispatch: dispatchNormalizedCommand,
+                    commandId: serverCommandId("pi-tree-transcript-replace"),
+                    createdAt: nowIso,
+                  });
+                }),
+              ),
+            ),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.abortBranchSummary]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.abortBranchSummary,
+            runPiNative("abortBranchSummary", (service) => service.abortPiBranchSummary(threadId)),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.setEntryLabel]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.setEntryLabel,
+            runPiNative("setEntryLabel", (service) => service.setPiEntryLabel(input)),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.reload]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.reload,
+            runPiNative("reload", (service) => service.reloadPiResources(threadId)),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.compact]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.compact,
+            runPiNative("compact", (service) => service.compactPiSession(input)),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.getStateAndStats]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.getStateAndStats,
+            runPiNative("getStateAndStats", (service) =>
+              service.getPiSessionStateAndStats(threadId),
+            ),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.setSessionName]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.setSessionName,
+            runPiNative("setSessionName", (service) => service.setPiSessionName(input)),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.getLastAssistantText]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.getLastAssistantText,
+            runPiNative("getLastAssistantText", (service) =>
+              service.getPiLastAssistantText(threadId),
+            ),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.exportHtml]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.exportHtml,
+            runPiNative("exportHtml", (service) => service.exportPiSessionHtml(input)).pipe(
+              Effect.flatMap(issuePiExportAssetUrl),
+              Effect.mapError((cause) => toPiNativeError("exportHtml", cause)),
+            ),
+            { "rpc.aggregate": "pi-native" },
+          ),
+        [PI_NATIVE_WS_METHODS.getSettings]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.getSettings,
+            runPiNative("getSettings", (service) => service.getPiSettings(input)),
+          ),
+        [PI_NATIVE_WS_METHODS.updateSettings]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.updateSettings,
+            runPiNative("updateSettings", (service) =>
+              service.withPiSessionLock(input.threadId, service.updatePiSettings(input)),
+            ),
+          ),
+        [PI_NATIVE_WS_METHODS.getScopedModels]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.getScopedModels,
+            runPiNative("getScopedModels", (service) => service.getPiScopedModels(input)),
+          ),
+        [PI_NATIVE_WS_METHODS.updateScopedModels]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.updateScopedModels,
+            runPiNative("updateScopedModels", (service) =>
+              service.withPiSessionLock(input.threadId, service.updatePiScopedModels(input)),
+            ),
+          ),
+        [PI_NATIVE_WS_METHODS.listResumeSessions]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.listResumeSessions,
+            runPiNative("listResumeSessions", (service) => service.listPiResumeSessions(threadId)),
+          ),
+        [PI_NATIVE_WS_METHODS.resume]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.resume,
+            mutatePiSessionAndReplaceTranscript(input.threadId, "resume", (service) =>
+              service.resumePiSession(input),
+            ),
+          ),
+        [PI_NATIVE_WS_METHODS.importSession]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.importSession,
+            mutatePiSessionAndReplaceTranscript(input.threadId, "import", (service) =>
+              service.importPiSession(input),
+            ),
+          ),
+        [PI_NATIVE_WS_METHODS.fork]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.fork,
+            mutatePiSessionAndReplaceTranscript(input.threadId, "fork", (service) =>
+              service.forkPiSession(input),
+            ),
+          ),
+        [PI_NATIVE_WS_METHODS.clone]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.clone,
+            mutatePiSessionAndReplaceTranscript(threadId, "clone", (service) =>
+              service.clonePiSession(threadId),
+            ),
+          ),
+        [PI_NATIVE_WS_METHODS.getTrust]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.getTrust,
+            runPiNative("getTrust", (service) => service.getPiTrust(threadId)),
+          ),
+        [PI_NATIVE_WS_METHODS.setTrust]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.setTrust,
+            runPiNative("setTrust", (service) =>
+              service.withPiSessionLock(input.threadId, service.setPiTrust(input)),
+            ),
+          ),
+        [PI_NATIVE_WS_METHODS.getChangelog]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.getChangelog,
+            runPiNative("getChangelog", (service) => service.getPiChangelog(threadId)),
+          ),
+        [PI_NATIVE_WS_METHODS.getAuthState]: ({ threadId }) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.getAuthState,
+            runPiNative("getAuthState", (service) => service.getPiAuthState(threadId)),
+          ),
+        [PI_NATIVE_WS_METHODS.beginAuthLogin]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.beginAuthLogin,
+            runPiNative("beginAuthLogin", (service) => service.beginPiAuthLogin(input)),
+          ),
+        [PI_NATIVE_WS_METHODS.getAuthFlow]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.getAuthFlow,
+            runPiNative("getAuthFlow", (service) => service.getPiAuthFlow(input)),
+          ),
+        [PI_NATIVE_WS_METHODS.respondAuthFlow]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.respondAuthFlow,
+            runPiNative("respondAuthFlow", (service) => service.respondPiAuthFlow(input)),
+          ),
+        [PI_NATIVE_WS_METHODS.cancelAuthFlow]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.cancelAuthFlow,
+            runPiNative("cancelAuthFlow", (service) => service.cancelPiAuthFlow(input)),
+          ),
+        [PI_NATIVE_WS_METHODS.logout]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.logout,
+            runPiNative("logout", (service) =>
+              service.withPiSessionLock(input.threadId, service.logoutPiAuth(input)),
+            ),
+          ),
+        [PI_NATIVE_WS_METHODS.share]: (input) =>
+          observeRpcEffect(
+            PI_NATIVE_WS_METHODS.share,
+            runPiNative("share", (service) =>
+              service.withPiSessionLock(input.threadId, service.sharePiSession(input)),
+            ),
+          ),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,

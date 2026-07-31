@@ -3,11 +3,13 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   clampCollapsedComposerCursor,
   collapseExpandedComposerCursor,
+  composerSubmissionRequiresProvider,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToInlineToken,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
+  resolveComposerSubmissionIntent,
   shouldSubmitComposerOnEnter,
 } from "./composer-logic";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
@@ -359,6 +361,25 @@ describe("isCollapsedCursorAdjacentToInlineToken", () => {
   });
 });
 
+describe("resolveComposerSubmissionIntent", () => {
+  it("intercepts native commands before an active plan follow-up", () => {
+    expect(resolveComposerSubmissionIntent("/tree", true)).toEqual({
+      type: "native-command",
+      command: "tree",
+    });
+    expect(resolveComposerSubmissionIntent("Refine the plan", true)).toEqual({
+      type: "plan-follow-up",
+    });
+  });
+
+  it("allows native commands without a provider", () => {
+    expect(composerSubmissionRequiresProvider("/hotkeys")).toBe(false);
+    expect(composerSubmissionRequiresProvider("/hotkeys", true)).toBe(true);
+    expect(composerSubmissionRequiresProvider("/review")).toBe(true);
+    expect(composerSubmissionRequiresProvider("hello")).toBe(true);
+  });
+});
+
 describe("parseStandaloneComposerSlashCommand", () => {
   it("parses standalone /plan command", () => {
     expect(parseStandaloneComposerSlashCommand(" /plan ")).toBe("plan");
@@ -368,7 +389,11 @@ describe("parseStandaloneComposerSlashCommand", () => {
     expect(parseStandaloneComposerSlashCommand("/default")).toBe("default");
   });
 
-  it("ignores slash commands with extra message text", () => {
-    expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  it("intercepts native command arguments instead of sending them as provider text", () => {
+    expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBe("plan");
+  });
+
+  it("leaves provider extension commands as text", () => {
+    expect(parseStandaloneComposerSlashCommand("/review explain this")).toBeNull();
   });
 });

@@ -1093,6 +1093,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.transcript.replace": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.transcript-replaced",
+        payload: {
+          threadId: command.threadId,
+          messages: command.messages,
+          activities: command.activities,
+          resetDerivedState: command.resetDerivedState,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.revert.complete": {
       yield* requireThread({
         readModel,

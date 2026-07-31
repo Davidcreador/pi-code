@@ -12,6 +12,37 @@
  * @module ProviderService
  */
 import type {
+  PiNativeAuthFlow,
+  PiNativeAuthFlowInput,
+  PiNativeAuthResponseInput,
+  PiNativeAuthState,
+  PiNativeBeginAuthInput,
+  PiNativeCompactInput,
+  PiNativeCompactResult,
+  PiNativeExportHtmlInput,
+  PiNativeLastAssistantText,
+  PiNativeLogoutInput,
+  PiNativeForkInput,
+  PiNativeImportInput,
+  PiNativeNavigateTreeInput,
+  PiNativeResumeInput,
+  PiNativeResumeSessionsResult,
+  PiNativeScopedModelsResult,
+  PiNativeSessionMutationResult,
+  PiNativeSetTrustInput,
+  PiNativeSettingsInput,
+  PiNativeSettingsResult,
+  PiNativeShareInput,
+  PiNativeShareResult,
+  PiNativeTrustResult,
+  PiNativeUpdateScopedModelsInput,
+  PiNativeUpdateSettingsInput,
+  PiNativeChangelogResult,
+  PiNativeNavigateTreeResult,
+  PiNativeSessionStateAndStats,
+  PiNativeSessionTree,
+  PiNativeSetEntryLabelInput,
+  PiNativeSetSessionNameInput,
   ProviderInterruptTurnInput,
   ProviderInstanceId,
   ProviderRespondToRequestInput,
@@ -24,11 +55,13 @@ import type {
   ThreadId,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
+import type { PiSessionHtmlExport } from "./PiNativeAdapter.ts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { ProviderServiceError } from "../Errors.ts";
+import type { PiActiveTranscript } from "../piTranscript.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 
@@ -104,6 +137,95 @@ export interface ProviderServiceShape {
     readonly threadId: ThreadId;
     readonly numTurns: number;
   }) => Effect.Effect<void, ProviderServiceError>;
+
+  readonly withPiSessionLock: <A, E, R>(
+    threadId: ThreadId,
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, ProviderServiceError | E, R>;
+  readonly getPiSessionTree: (
+    threadId: ThreadId,
+  ) => Effect.Effect<PiNativeSessionTree, ProviderServiceError>;
+  readonly getPiActiveTranscript: (
+    threadId: ThreadId,
+  ) => Effect.Effect<PiActiveTranscript, ProviderServiceError>;
+  readonly navigatePiSessionTree: (
+    input: PiNativeNavigateTreeInput,
+  ) => Effect.Effect<PiNativeNavigateTreeResult, ProviderServiceError>;
+  readonly abortPiBranchSummary: (threadId: ThreadId) => Effect.Effect<void, ProviderServiceError>;
+  readonly setPiEntryLabel: (
+    input: PiNativeSetEntryLabelInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+  readonly reloadPiResources: (threadId: ThreadId) => Effect.Effect<void, ProviderServiceError>;
+  readonly compactPiSession: (
+    input: PiNativeCompactInput,
+  ) => Effect.Effect<PiNativeCompactResult, ProviderServiceError>;
+  readonly getPiSessionStateAndStats: (
+    threadId: ThreadId,
+  ) => Effect.Effect<PiNativeSessionStateAndStats, ProviderServiceError>;
+  readonly setPiSessionName: (
+    input: PiNativeSetSessionNameInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+  readonly getPiLastAssistantText: (
+    threadId: ThreadId,
+  ) => Effect.Effect<PiNativeLastAssistantText, ProviderServiceError>;
+  readonly exportPiSessionHtml: (
+    input: PiNativeExportHtmlInput,
+  ) => Effect.Effect<PiSessionHtmlExport, ProviderServiceError>;
+  readonly getPiSettings: (
+    input: PiNativeSettingsInput,
+  ) => Effect.Effect<PiNativeSettingsResult, ProviderServiceError>;
+  readonly updatePiSettings: (
+    input: PiNativeUpdateSettingsInput,
+  ) => Effect.Effect<PiNativeSettingsResult, ProviderServiceError>;
+  readonly getPiScopedModels: (
+    input: PiNativeSettingsInput,
+  ) => Effect.Effect<PiNativeScopedModelsResult, ProviderServiceError>;
+  readonly updatePiScopedModels: (
+    input: PiNativeUpdateScopedModelsInput,
+  ) => Effect.Effect<PiNativeScopedModelsResult, ProviderServiceError>;
+  readonly listPiResumeSessions: (
+    threadId: ThreadId,
+  ) => Effect.Effect<PiNativeResumeSessionsResult, ProviderServiceError>;
+  readonly resumePiSession: (
+    input: PiNativeResumeInput,
+  ) => Effect.Effect<PiNativeSessionMutationResult, ProviderServiceError>;
+  readonly importPiSession: (
+    input: PiNativeImportInput,
+  ) => Effect.Effect<PiNativeSessionMutationResult, ProviderServiceError>;
+  readonly forkPiSession: (
+    input: PiNativeForkInput,
+  ) => Effect.Effect<PiNativeSessionMutationResult, ProviderServiceError>;
+  readonly clonePiSession: (
+    threadId: ThreadId,
+  ) => Effect.Effect<PiNativeSessionMutationResult, ProviderServiceError>;
+  readonly getPiTrust: (
+    threadId: ThreadId,
+  ) => Effect.Effect<PiNativeTrustResult, ProviderServiceError>;
+  readonly setPiTrust: (
+    input: PiNativeSetTrustInput,
+  ) => Effect.Effect<PiNativeTrustResult, ProviderServiceError>;
+  readonly getPiChangelog: (
+    threadId: ThreadId,
+  ) => Effect.Effect<PiNativeChangelogResult, ProviderServiceError>;
+  readonly getPiAuthState: (
+    threadId: ThreadId,
+  ) => Effect.Effect<PiNativeAuthState, ProviderServiceError>;
+  readonly beginPiAuthLogin: (
+    input: PiNativeBeginAuthInput,
+  ) => Effect.Effect<PiNativeAuthFlow, ProviderServiceError>;
+  readonly getPiAuthFlow: (
+    input: PiNativeAuthFlowInput,
+  ) => Effect.Effect<PiNativeAuthFlow, ProviderServiceError>;
+  readonly respondPiAuthFlow: (
+    input: PiNativeAuthResponseInput,
+  ) => Effect.Effect<PiNativeAuthFlow, ProviderServiceError>;
+  readonly cancelPiAuthFlow: (
+    input: PiNativeAuthFlowInput,
+  ) => Effect.Effect<PiNativeAuthFlow, ProviderServiceError>;
+  readonly logoutPiAuth: (input: PiNativeLogoutInput) => Effect.Effect<void, ProviderServiceError>;
+  readonly sharePiSession: (
+    input: PiNativeShareInput,
+  ) => Effect.Effect<PiNativeShareResult, ProviderServiceError>;
 
   /**
    * Canonical provider runtime event stream.

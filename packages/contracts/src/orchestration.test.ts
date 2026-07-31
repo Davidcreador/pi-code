@@ -23,6 +23,8 @@ import {
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
+  THREAD_TRANSCRIPT_MAX_ACTIVITIES,
+  THREAD_TRANSCRIPT_MAX_MESSAGES,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -53,6 +55,54 @@ const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPaylo
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+
+it.effect("rejects unbounded transcript replacement commands", () =>
+  Effect.gen(function* () {
+    const messages = Array.from({ length: THREAD_TRANSCRIPT_MAX_MESSAGES + 1 }, (_, index) => ({
+      id: `message-${index}`,
+      role: "user",
+      text: "message",
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    }));
+    const exit = yield* Effect.exit(
+      decodeOrchestrationCommand({
+        type: "thread.transcript.replace",
+        commandId: "replace",
+        threadId: "thread-1",
+        messages,
+        activities: [],
+        resetDerivedState: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    assert.strictEqual(exit._tag, "Failure");
+
+    const activities = Array.from({ length: THREAD_TRANSCRIPT_MAX_ACTIVITIES + 1 }, (_, index) => ({
+      id: `activity-${index}`,
+      tone: "tool",
+      kind: "tool.completed",
+      summary: "tool",
+      payload: {},
+      turnId: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }));
+    const activityExit = yield* Effect.exit(
+      decodeOrchestrationCommand({
+        type: "thread.transcript.replace",
+        commandId: "replace-activities",
+        threadId: "thread-1",
+        messages: [],
+        activities,
+        resetDerivedState: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    assert.strictEqual(activityExit._tag, "Failure");
+  }),
+);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {

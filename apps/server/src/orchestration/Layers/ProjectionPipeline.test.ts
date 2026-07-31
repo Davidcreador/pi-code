@@ -2462,6 +2462,245 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       ]);
     }),
   );
+  it.effect("durably replaces the active transcript and clears branch-specific rows", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { attachmentsDir } = yield* ServerConfig;
+      const retainedAttachmentId = "thread-transcript-00000000-0000-4000-8000-000000000001";
+      const staleAttachmentId = "thread-transcript-00000000-0000-4000-8000-000000000002";
+      const retainedAttachmentPath = path.join(attachmentsDir, `${retainedAttachmentId}.png`);
+      const staleAttachmentPath = path.join(attachmentsDir, `${staleAttachmentId}.png`);
+      yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
+      yield* fileSystem.writeFile(retainedAttachmentPath, new Uint8Array([1]));
+      yield* fileSystem.writeFile(staleAttachmentPath, new Uint8Array([2]));
+      const now = "2026-01-01T00:00:00.000Z";
+      const base = {
+        aggregateKind: "thread" as const,
+        aggregateId: ThreadId.make("thread-transcript"),
+        occurredAt: now,
+        causationEventId: null,
+        metadata: {},
+      };
+      yield* eventStore.append({
+        ...base,
+        type: "thread.created",
+        eventId: EventId.make("transcript-created"),
+        commandId: CommandId.make("transcript-created"),
+        correlationId: CommandId.make("transcript-created"),
+        payload: {
+          threadId: ThreadId.make("thread-transcript"),
+          projectId: ProjectId.make("project-transcript"),
+          title: "Transcript",
+          modelSelection: { instanceId: ProviderInstanceId.make("pi"), model: "model" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* eventStore.append({
+        ...base,
+        type: "thread.message-sent",
+        eventId: EventId.make("transcript-old-message"),
+        commandId: CommandId.make("transcript-old-message"),
+        correlationId: CommandId.make("transcript-old-message"),
+        payload: {
+          threadId: ThreadId.make("thread-transcript"),
+          messageId: MessageId.make("old-message"),
+          role: "user",
+          text: "old",
+          turnId: TurnId.make("old-turn"),
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* eventStore.append({
+        ...base,
+        type: "thread.activity-appended",
+        eventId: EventId.make("transcript-old-activity"),
+        commandId: CommandId.make("transcript-old-activity"),
+        correlationId: CommandId.make("transcript-old-activity"),
+        payload: {
+          threadId: ThreadId.make("thread-transcript"),
+          activity: {
+            id: EventId.make("old-activity"),
+            tone: "tool",
+            kind: "tool.completed",
+            summary: "old",
+            payload: {},
+            turnId: TurnId.make("old-turn"),
+            createdAt: now,
+          },
+        },
+      });
+      yield* eventStore.append({
+        ...base,
+        type: "thread.activity-appended",
+        eventId: EventId.make("transcript-old-approval"),
+        commandId: CommandId.make("transcript-old-approval"),
+        correlationId: CommandId.make("transcript-old-approval"),
+        payload: {
+          threadId: ThreadId.make("thread-transcript"),
+          activity: {
+            id: EventId.make("old-approval"),
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "old approval",
+            payload: { requestId: "old-request" },
+            turnId: TurnId.make("old-turn"),
+            createdAt: now,
+          },
+        },
+      });
+      yield* eventStore.append({
+        ...base,
+        type: "thread.proposed-plan-upserted",
+        eventId: EventId.make("transcript-old-plan"),
+        commandId: CommandId.make("transcript-old-plan"),
+        correlationId: CommandId.make("transcript-old-plan"),
+        payload: {
+          threadId: ThreadId.make("thread-transcript"),
+          proposedPlan: {
+            id: "old-plan",
+            turnId: TurnId.make("old-turn"),
+            planMarkdown: "old",
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      });
+      yield* eventStore.append({
+        ...base,
+        type: "thread.turn-diff-completed",
+        eventId: EventId.make("transcript-old-turn"),
+        commandId: CommandId.make("transcript-old-turn"),
+        correlationId: CommandId.make("transcript-old-turn"),
+        payload: {
+          threadId: ThreadId.make("thread-transcript"),
+          turnId: TurnId.make("old-turn"),
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make("old-checkpoint"),
+          status: "ready",
+          files: [],
+          assistantMessageId: null,
+          completedAt: now,
+        },
+      });
+      const replacementMessages = [
+        {
+          id: MessageId.make("new-message"),
+          role: "user" as const,
+          text: "new",
+          attachments: [
+            {
+              type: "image" as const,
+              id: retainedAttachmentId,
+              name: "image.png",
+              mimeType: "image/png",
+              sizeBytes: 1,
+            },
+          ],
+          turnId: TurnId.make("new-turn"),
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ];
+      const replacementActivities = [
+        {
+          id: EventId.make("new-activity"),
+          tone: "tool" as const,
+          kind: "tool.completed" as const,
+          summary: "new",
+          payload: {},
+          turnId: TurnId.make("new-turn"),
+          createdAt: now,
+        },
+      ];
+      yield* eventStore.append({
+        ...base,
+        type: "thread.transcript-replaced",
+        eventId: EventId.make("transcript-reconciled"),
+        commandId: CommandId.make("transcript-reconciled"),
+        correlationId: CommandId.make("transcript-reconciled"),
+        payload: {
+          threadId: ThreadId.make("thread-transcript"),
+          messages: replacementMessages,
+          activities: replacementActivities,
+          resetDerivedState: false,
+          updatedAt: now,
+        },
+      });
+      yield* projectionPipeline.bootstrap;
+      const retainedPlans = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS "count" FROM projection_thread_proposed_plans
+        WHERE thread_id = 'thread-transcript'
+      `;
+      const retainedTurns = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS "count" FROM projection_turns
+        WHERE thread_id = 'thread-transcript'
+      `;
+      const retainedApprovals = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS "count" FROM projection_pending_approvals
+        WHERE thread_id = 'thread-transcript'
+      `;
+      assert.deepEqual(retainedPlans, [{ count: 1 }]);
+      assert.deepEqual(retainedTurns, [{ count: 1 }]);
+      assert.deepEqual(retainedApprovals, [{ count: 1 }]);
+
+      const replacement = yield* eventStore.append({
+        ...base,
+        type: "thread.transcript-replaced",
+        eventId: EventId.make("transcript-replaced"),
+        commandId: CommandId.make("transcript-replaced"),
+        correlationId: CommandId.make("transcript-replaced"),
+        payload: {
+          threadId: ThreadId.make("thread-transcript"),
+          messages: replacementMessages,
+          activities: replacementActivities,
+          resetDerivedState: true,
+          updatedAt: now,
+        },
+      });
+
+      yield* projectionPipeline.projectEvent(replacement);
+      const messages = yield* sql<{ readonly messageId: string }>`
+        SELECT message_id AS "messageId" FROM projection_thread_messages
+        WHERE thread_id = 'thread-transcript'
+      `;
+      const activities = yield* sql<{ readonly activityId: string }>`
+        SELECT activity_id AS "activityId" FROM projection_thread_activities
+        WHERE thread_id = 'thread-transcript'
+      `;
+      const plans = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS "count" FROM projection_thread_proposed_plans
+        WHERE thread_id = 'thread-transcript'
+      `;
+      const turns = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS "count" FROM projection_turns
+        WHERE thread_id = 'thread-transcript'
+      `;
+      const approvals = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS "count" FROM projection_pending_approvals
+        WHERE thread_id = 'thread-transcript'
+      `;
+      assert.deepEqual(messages, [{ messageId: "new-message" }]);
+      assert.deepEqual(activities, [{ activityId: "new-activity" }]);
+      assert.deepEqual(plans, [{ count: 0 }]);
+      assert.deepEqual(turns, [{ count: 0 }]);
+      assert.deepEqual(approvals, [{ count: 0 }]);
+      assert.isTrue(yield* exists(retainedAttachmentPath));
+      assert.isFalse(yield* exists(staleAttachmentPath));
+    }),
+  );
 });
 
 it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-"))(

@@ -1,8 +1,9 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+import { parseNativeSlashCommand, type NativeSlashCommand } from "./nativeSlashCommands";
 
 export type ComposerTriggerKind = "path" | "slash-command" | "skill";
-export type ComposerSlashCommand = "model" | "plan" | "default";
+export type ComposerSlashCommand = NativeSlashCommand;
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
@@ -262,16 +263,27 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
   };
 }
 
-export function parseStandaloneComposerSlashCommand(
+export const parseStandaloneComposerSlashCommand = parseNativeSlashCommand;
+
+export function resolveComposerSubmissionIntent(
   text: string,
-): Exclude<ComposerSlashCommand, "model"> | null {
-  const match = /^\/(plan|default)\s*$/i.exec(text.trim());
-  if (!match) {
-    return null;
-  }
-  const command = match[1]?.toLowerCase();
-  if (command === "plan") return "plan";
-  return "default";
+  planFollowUpActive: boolean,
+):
+  | { readonly type: "native-command"; readonly command: NativeSlashCommand }
+  | { readonly type: "plan-follow-up" }
+  | { readonly type: "message" } {
+  const command = parseNativeSlashCommand(text);
+  if (command) return { type: "native-command", command };
+  return planFollowUpActive ? { type: "plan-follow-up" } : { type: "message" };
+}
+
+export function composerSubmissionRequiresProvider(
+  text: string,
+  hasAttachedContext = false,
+): boolean {
+  return (
+    hasAttachedContext || resolveComposerSubmissionIntent(text, false).type !== "native-command"
+  );
 }
 
 export function replaceTextRange(

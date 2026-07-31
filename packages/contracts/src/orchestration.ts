@@ -802,6 +802,26 @@ const ThreadSessionSetCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const THREAD_TRANSCRIPT_MAX_MESSAGES = 2_000;
+export const THREAD_TRANSCRIPT_MAX_ACTIVITIES = 500;
+
+const BoundedTranscriptMessages = Schema.Array(OrchestrationMessage).check(
+  Schema.isMaxLength(THREAD_TRANSCRIPT_MAX_MESSAGES),
+);
+const BoundedTranscriptActivities = Schema.Array(OrchestrationThreadActivity).check(
+  Schema.isMaxLength(THREAD_TRANSCRIPT_MAX_ACTIVITIES),
+);
+
+const ThreadTranscriptReplaceCommand = Schema.Struct({
+  type: Schema.Literal("thread.transcript.replace"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messages: BoundedTranscriptMessages,
+  activities: BoundedTranscriptActivities,
+  resetDerivedState: Schema.Boolean,
+  createdAt: IsoDateTime,
+});
+
 const ThreadMessageAssistantDeltaCommand = Schema.Struct({
   type: Schema.Literal("thread.message.assistant.delta"),
   commandId: CommandId,
@@ -861,6 +881,7 @@ const ThreadRevertCompleteCommand = Schema.Struct({
 
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
+  ThreadTranscriptReplaceCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadProposedPlanUpsertCommand,
@@ -900,6 +921,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.reverted",
   "thread.session-stop-requested",
   "thread.session-set",
+  "thread.transcript-replaced",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
@@ -1085,6 +1107,14 @@ export const ThreadSessionSetPayload = Schema.Struct({
   session: OrchestrationSession,
 });
 
+export const ThreadTranscriptReplacedPayload = Schema.Struct({
+  threadId: ThreadId,
+  messages: BoundedTranscriptMessages,
+  activities: BoundedTranscriptActivities,
+  resetDerivedState: Schema.Boolean,
+  updatedAt: IsoDateTime,
+});
+
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({
   threadId: ThreadId,
   proposedPlan: OrchestrationProposedPlan,
@@ -1242,6 +1272,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.session-set"),
     payload: ThreadSessionSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.transcript-replaced"),
+    payload: ThreadTranscriptReplacedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

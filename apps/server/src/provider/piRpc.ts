@@ -42,6 +42,7 @@ export interface PiRpcProcess {
   readonly events: Stream.Stream<PiRpcRecord>;
   /** Resolves with the process exit code; never fails. */
   readonly awaitExit: Effect.Effect<number>;
+  readonly terminate: Effect.Effect<void, PiRpcError>;
 }
 
 export interface SpawnPiRpcInput {
@@ -105,6 +106,8 @@ export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcIn
   const stdinQueue = yield* Queue.unbounded<Uint8Array>();
   const events = yield* Queue.unbounded<PiRpcRecord>();
   const pending = new Map<string, Deferred.Deferred<PiRpcRecord, PiRpcError>>();
+  const exitFinalized = yield* Deferred.make<void>();
+  let exitFinalizationStarted = false;
   let exited = false;
   let requestSeq = 0;
 
@@ -162,26 +165,42 @@ export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcIn
     Effect.orElseSucceed(() => -1),
   );
 
-  yield* awaitExit.pipe(
-    Effect.flatMap((code) =>
-      Effect.suspend(() => {
-        exited = true;
-        const failure = new PiRpcError({
-          operation: "request",
-          detail: `pi exited with code ${code} before responding`,
-        });
-        const waiting = [...pending.values()];
-        pending.clear();
-        return Effect.forEach(waiting, (deferred) => Deferred.fail(deferred, failure), {
-          discard: true,
-        }).pipe(
-          Effect.flatMap(() => Queue.shutdown(events)),
-          Effect.flatMap(() => Queue.shutdown(stdinQueue)),
-          Effect.asVoid,
-        );
-      }),
+  const finalizeExit = (code: number) =>
+    Effect.suspend(() => {
+      if (exitFinalizationStarted) return Deferred.await(exitFinalized);
+      exitFinalizationStarted = true;
+      exited = true;
+      const failure = new PiRpcError({
+        operation: "request",
+        detail: `pi exited with code ${code} before responding`,
+      });
+      const waiting = [...pending.values()];
+      pending.clear();
+      return Effect.forEach(waiting, (deferred) => Deferred.fail(deferred, failure), {
+        discard: true,
+      }).pipe(
+        Effect.andThen(Queue.shutdown(events)),
+        Effect.andThen(Queue.shutdown(stdinQueue)),
+        Effect.andThen(Deferred.succeed(exitFinalized, undefined)),
+        Effect.asVoid,
+        Effect.uninterruptible,
+      );
+    });
+
+  yield* awaitExit.pipe(Effect.flatMap(finalizeExit), Effect.forkScoped);
+
+  const terminate = handle.isRunning.pipe(
+    Effect.flatMap((running) => (running ? handle.kill() : Effect.void)),
+    Effect.mapError(
+      (cause) =>
+        new PiRpcError({
+          operation: "terminate",
+          detail: "Failed to terminate pi RPC process.",
+          cause,
+        }),
     ),
-    Effect.forkScoped,
+    Effect.andThen(awaitExit),
+    Effect.flatMap(finalizeExit),
   );
 
   const send = (command: PiRpcRecord) =>
@@ -222,5 +241,6 @@ export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcIn
     request,
     events: Stream.fromQueue(events),
     awaitExit,
+    terminate,
   } satisfies PiRpcProcess;
 });

@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+
 /**
  * Scripted stand-in for `pi --mode rpc`, used by PiAdapter.test.ts.
  *
@@ -7,19 +10,59 @@
  * turn but never settles it, so tests can assert interrupt behavior without
  * racing the natural completion.
  */
+if (process.argv.includes("--version")) {
+  console.log("0.83.0-fake");
+  process.exit(0);
+}
+
+if (process.env.FAKE_PI_EXIT_MARKER) {
+  const markClosed = () => NodeFS.writeFileSync(process.env.FAKE_PI_EXIT_MARKER, "closed");
+  process.on("exit", markClosed);
+  process.on("SIGTERM", () => {
+    markClosed();
+    process.exit(0);
+  });
+  process.on("SIGINT", () => {
+    markClosed();
+    process.exit(0);
+  });
+}
+
 process.stdin.setEncoding("utf8");
 const w = (o) => process.stdout.write(JSON.stringify(o) + "\n");
 let buf = "";
 let lastFork = null;
+const sessionIdIndex = process.argv.indexOf("--session-id");
+let activeSessionId = process.argv[sessionIdIndex + 1] || "fake-session";
+let currentModel = { provider: "anthropic", id: "claude-haiku-4-5" };
+let currentThinkingLevel = "medium";
+let currentSessionName = "Fake session";
+let sessionSwitched = false;
 
 // Two user turns on the active branch (u1 → a1 → u2 → a2), plus an abandoned
 // sibling branch off a1 that rollback must ignore.
 const ENTRIES = [
-  { type: "message", id: "u1", parentId: null, message: { role: "user" } },
-  { type: "message", id: "a1", parentId: "u1", message: { role: "assistant" } },
-  { type: "message", id: "u2", parentId: "a1", message: { role: "user" } },
-  { type: "message", id: "a2", parentId: "u2", message: { role: "assistant" } },
-  { type: "message", id: "u2-abandoned", parentId: "a1", message: { role: "user" } },
+  { type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user", content: [{ type: "text", text: "first prompt" }] } },
+  { type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:01.000Z", message: { role: "assistant", content: [{ type: "text", text: "first answer" }] } },
+  { type: "message", id: "u2", parentId: "a1", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "user", content: [{ type: "text", text: "second prompt" }] } },
+  { type: "message", id: "a2", parentId: "u2", timestamp: "2026-01-01T00:00:03.000Z", message: { role: "assistant", content: [{ type: "text", text: "second answer" }] } },
+  { type: "message", id: "u2-abandoned", parentId: "a1", timestamp: "2026-01-01T00:00:04.000Z", message: { role: "user", content: [{ type: "text", text: "abandoned prompt" }] } },
+];
+const byId = Object.fromEntries(ENTRIES.map((entry) => [entry.id, entry]));
+const TREE = [
+  {
+    entry: byId.u1,
+    children: [
+      {
+        entry: byId.a1,
+        label: "checkpoint",
+        children: [
+          { entry: byId.u2, children: [{ entry: byId.a2, children: [] }] },
+          { entry: byId["u2-abandoned"], children: [] },
+        ],
+      },
+    ],
+  },
 ];
 
 process.stdin.on("data", (chunk) => {
@@ -31,26 +74,83 @@ process.stdin.on("data", (chunk) => {
     if (!line.trim()) continue;
     const cmd = JSON.parse(line);
     switch (cmd.type) {
+      case "get_capabilities":
+        if (process.env.FAKE_PI_CAPABILITIES === "error") {
+          w({
+            type: "response",
+            id: cmd.id,
+            command: "get_capabilities",
+            success: false,
+            error: "capability probe failed",
+          });
+          break;
+        }
+        w({
+          type: "response",
+          id: cmd.id,
+          command: "get_capabilities",
+          success: true,
+          data: {
+            protocolVersion: 1,
+            capabilities:
+              process.env.FAKE_PI_CAPABILITIES === "partial"
+                ? ["navigate_tree"]
+                : ["navigate_tree", "abort_branch_summary", "reload", "set_entry_label", "safe_settings", "scoped_models", "session_management", "project_trust", "changelog", "auth"],
+          },
+        });
+        break;
       case "get_state":
+        if (sessionSwitched && process.env.FAKE_PI_SWITCH_FAILURE === "state") {
+          w({
+            type: "response",
+            id: cmd.id,
+            command: "get_state",
+            success: false,
+            error: "state unavailable after switch",
+          });
+          break;
+        }
         w({
           type: "response",
           id: cmd.id,
           command: "get_state",
           success: true,
           data: {
-            sessionId: "fake-session",
-            thinkingLevel: "medium",
-            model: { provider: "anthropic", id: "claude-haiku-4-5" },
+            sessionId: activeSessionId,
+            sessionName: currentSessionName,
+            thinkingLevel: currentThinkingLevel,
+            model: currentModel,
+            isStreaming: process.env.FAKE_PI_BUSY === "streaming",
+            isCompacting: process.env.FAKE_PI_BUSY === "compacting",
+            steeringMode: "all",
+            followUpMode: "all",
+            autoCompactionEnabled: true,
+            messageCount: 4,
+            pendingMessageCount: 0,
           },
         });
         break;
       case "set_model":
+        if (process.env.FAKE_PI_REJECT_REDUNDANT_SELECTION === "1" && cmd.provider === currentModel.provider && cmd.modelId === currentModel.id) {
+          w({ type: "response", id: cmd.id, command: cmd.type, success: false, error: "redundant model selection" });
+          break;
+        }
+        currentModel = { provider: cmd.provider, id: cmd.modelId };
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true });
+        break;
       case "set_thinking_level":
+        if (process.env.FAKE_PI_REJECT_REDUNDANT_SELECTION === "1" && cmd.level === currentThinkingLevel) {
+          w({ type: "response", id: cmd.id, command: cmd.type, success: false, error: "redundant thinking selection" });
+          break;
+        }
+        currentThinkingLevel = cmd.level;
         w({ type: "response", id: cmd.id, command: cmd.type, success: true });
         break;
       case "prompt":
         w({ type: "response", id: cmd.id, command: "prompt", success: true });
         w({ type: "extension_ui_request", id: "ui-1", method: "setStatus", statusKey: "noise" });
+        w({ type: "extension_ui_request", id: "ui-clear-status", method: "clearStatus", statusKey: "noise" });
+        w({ type: "extension_ui_request", id: "ui-clear-widget", method: "clearWidget", widgetKey: "noise" });
         w({ type: "agent_start" });
         if (String(cmd.message).includes("HOLD")) break;
         if (String(cmd.message).includes("ASK")) {
@@ -80,6 +180,7 @@ process.stdin.on("data", (chunk) => {
             id: "ui-editor",
             method: "editor",
             title: "Write something",
+            prefill: "original text",
           });
           break;
         }
@@ -112,6 +213,153 @@ process.stdin.on("data", (chunk) => {
         w({ type: "response", id: cmd.id, command: "abort", success: true });
         w({ type: "agent_settled" });
         break;
+      case "get_tree":
+        w({
+          type: "response",
+          id: cmd.id,
+          command: "get_tree",
+          success: true,
+          data: { tree: TREE, leafId: "a2" },
+        });
+        break;
+      case "navigate_tree":
+        if (cmd.targetId === "stale") {
+          w({ type: "response", id: cmd.id, command: "navigate_tree", success: false, error: "Entry not found: stale" });
+          break;
+        }
+        w({
+          type: "response",
+          id: cmd.id,
+          command: "navigate_tree",
+          success: true,
+          data: cmd.targetId === "abort"
+            ? { cancelled: false, aborted: true, leafId: "a2" }
+            : cmd.targetId === "cancel"
+              ? { cancelled: true, leafId: "a2" }
+              : { cancelled: false, editorText: "second prompt", leafId: cmd.targetId },
+        });
+        break;
+      case "abort_branch_summary":
+      case "reload":
+      case "set_entry_label":
+      case "set_session_name":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true });
+        break;
+      case "compact":
+        w({
+          type: "response",
+          id: cmd.id,
+          command: "compact",
+          success: true,
+          data: { summary: "compacted", firstKeptEntryId: "u2", tokensBefore: 1200, estimatedTokensAfter: 300 },
+        });
+        break;
+      case "get_session_stats":
+        w({
+          type: "response",
+          id: cmd.id,
+          command: "get_session_stats",
+          success: true,
+          data: {
+            sessionId: "fake-session",
+            userMessages: 2,
+            assistantMessages: 2,
+            toolCalls: 1,
+            toolResults: 1,
+            totalMessages: 6,
+            tokens: { input: 10, output: 20, cacheRead: 30, cacheWrite: 40, total: 100 },
+            cost: 0.01,
+            contextUsage: { tokens: 100, contextWindow: 200000, percent: 0.05 },
+          },
+        });
+        break;
+      case "get_safe_settings":
+      case "set_safe_settings":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { scope: cmd.scope, values: cmd.values || { quietStartup: true } } });
+        break;
+      case "get_scoped_models":
+      case "set_scoped_models":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { scope: cmd.scope, patterns: cmd.patterns || [], models: [], diagnostics: [] } });
+        break;
+      case "list_resume_sessions":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { sessions: [{ id: "opaque-1", sessionId: process.env.FAKE_PI_RESUME_TARGET || "fake-session", name: "Fake", createdAt: "2026-01-01T00:00:00.000Z", modifiedAt: "2026-01-01T00:00:01.000Z", messageCount: 4, current: false }] } });
+        break;
+      case "resume_session":
+      case "import_session":
+      case "fork_session":
+      case "clone_session":
+        activeSessionId = `fake-${cmd.type}`;
+        currentModel = { provider: "openai", id: "gpt-5" };
+        currentThinkingLevel = "high";
+        currentSessionName = "Switched session";
+        sessionSwitched = true;
+        if (process.env.FAKE_PI_SWITCH_FAILURE === "exit") {
+          process.exit(0);
+        }
+        w({
+          type: "response",
+          id: cmd.id,
+          command: cmd.type,
+          success: true,
+          data:
+            process.env.FAKE_PI_SWITCH_FAILURE === "malformed"
+              ? {}
+              : {
+                  cancelled: false,
+                  sessionId: activeSessionId,
+                  ...(cmd.type === "fork_session" ? { editorText: "forked prompt" } : {}),
+                },
+        });
+        break;
+      case "get_project_trust":
+      case "set_project_trust":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { decision: cmd.type === "set_project_trust" ? cmd.trusted : null } });
+        break;
+      case "get_changelog":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { entries: [{ version: "0.83.0", markdown: "## 0.83.0" }] } });
+        break;
+      case "get_auth_state":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { providers: [{ id: "anthropic", name: "Anthropic", methods: ["oauth", "api_key"], configured: false, storedCredential: false }] } });
+        break;
+      case "begin_auth_login":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { flowId: "fake-auth-flow", providerId: cmd.providerId, authType: cmd.authType, status: "running", prompt: { id: "fake-auth-prompt", type: "secret", message: "API key" } } });
+        break;
+      case "get_auth_flow":
+      case "respond_auth_flow":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { flowId: "fake-auth-flow", providerId: "anthropic", authType: "api_key", status: cmd.type === "respond_auth_flow" ? "succeeded" : "running" } });
+        break;
+      case "cancel_auth_flow":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { flowId: "fake-auth-flow", providerId: "anthropic", authType: "api_key", status: "cancelled" } });
+        break;
+      case "logout_auth":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true });
+        break;
+      case "get_last_assistant_text":
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { text: "second answer" } });
+        break;
+      case "export_html": {
+        const outputPath = cmd.outputPath || "/tmp/fake-session.html";
+        switch (process.env.FAKE_PI_EXPORT_MODE) {
+          case "missing":
+            break;
+          case "symlink": {
+            const outsidePath = NodePath.join(NodePath.dirname(outputPath), "..", "fake-export-outside.html");
+            NodeFS.writeFileSync(outsidePath, "<html>outside export</html>");
+            NodeFS.symlinkSync(outsidePath, outputPath);
+            break;
+          }
+          case "directory":
+            NodeFS.mkdirSync(outputPath);
+            break;
+          case "empty":
+            NodeFS.writeFileSync(outputPath, "");
+            break;
+          default:
+            NodeFS.writeFileSync(outputPath, "<html>fake export</html>");
+        }
+        w({ type: "response", id: cmd.id, command: cmd.type, success: true, data: { path: outputPath } });
+        break;
+      }
       case "get_entries":
         w({
           type: "response",

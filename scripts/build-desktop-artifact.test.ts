@@ -267,6 +267,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         },
         overrides: {
           effect: "4.0.0-beta.73",
+          "@earendil-works/pi-agent-core": "0.83.0",
+          "@earendil-works/pi-ai": "0.83.0",
+          "@earendil-works/pi-tui": "0.83.0",
         },
       }),
       {
@@ -285,6 +288,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         },
         overrides: {
           effect: "4.0.0-beta.73",
+          "@earendil-works/pi-agent-core": "0.83.0",
+          "@earendil-works/pi-ai": "0.83.0",
+          "@earendil-works/pi-tui": "0.83.0",
         },
       },
     );

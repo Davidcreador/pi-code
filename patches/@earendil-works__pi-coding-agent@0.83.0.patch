@@ -1,0 +1,714 @@
+diff --git a/dist/modes/rpc/rpc-client.d.ts b/dist/modes/rpc/rpc-client.d.ts
+index 9263bde..fcbac96 100644
+--- a/dist/modes/rpc/rpc-client.d.ts
++++ b/dist/modes/rpc/rpc-client.d.ts
+@@ -208,6 +208,43 @@ export declare class RpcClient {
+         tree: SessionTreeNode[];
+         leafId: string | null;
+     }>;
++    getCapabilities(): Promise<{
++        protocolVersion: 1;
++        capabilities: Array<"navigate_tree" | "abort_branch_summary" | "reload" | "set_entry_label" | "safe_settings" | "scoped_models" | "session_management" | "project_trust" | "changelog" | "auth">;
++    }>;
++    navigateTree(targetId: string, options?: {
++        summarize?: boolean;
++        customInstructions?: string;
++        replaceInstructions?: boolean;
++        label?: string;
++    }): Promise<{
++        editorText?: string;
++        cancelled: boolean;
++        aborted?: boolean;
++        summaryEntry?: SessionEntry;
++        leafId: string | null;
++    }>;
++    abortBranchSummary(): Promise<void>;
++    reload(): Promise<void>;
++    setEntryLabel(targetId: string, label?: string): Promise<void>;
++    getSafeSettings(scope: "global" | "project"): Promise<{ scope: "global" | "project"; values: Record<string, unknown>; }>;
++    setSafeSettings(scope: "global" | "project", values: Record<string, unknown>): Promise<{ scope: "global" | "project"; values: Record<string, unknown>; }>;
++    getScopedModels(scope: "global" | "project"): Promise<{ scope: "global" | "project"; patterns: string[]; models: Array<{ provider: string; id: string; name: string; thinkingLevel?: string; }>; diagnostics: Array<{ type: "warning"; code: "no-match" | "invalid-thinking-level"; message: string; pattern: string; }>; }>;
++    setScopedModels(scope: "global" | "project", patterns: string[]): ReturnType<RpcClient["getScopedModels"]>;
++    listResumeSessions(): Promise<{ sessions: Array<{ id: string; sessionId: string; name?: string; createdAt: string; modifiedAt: string; messageCount: number; current: boolean; }>; }>;
++    resumeSession(sessionId: string): Promise<{ cancelled: boolean; sessionId: string; editorText?: string; }>;
++    importSession(filename: string, content: string): ReturnType<RpcClient["resumeSession"]>;
++    forkSession(entryId: string): ReturnType<RpcClient["resumeSession"]>;
++    cloneSession(): ReturnType<RpcClient["resumeSession"]>;
++    getProjectTrust(): Promise<{ decision: boolean | null; }>;
++    setProjectTrust(trusted: boolean, confirmed?: boolean): ReturnType<RpcClient["getProjectTrust"]>;
++    getChangelog(): Promise<{ entries: Array<{ version: string; markdown: string; }>; }>;
++    getAuthState(): Promise<{ providers: Array<{ id: string; name: string; methods: Array<"oauth" | "api_key">; configured: boolean; storedCredential: boolean; credentialType?: "oauth" | "api_key"; }>; }>;
++    beginAuthLogin(providerId: string, authType: "oauth" | "api_key"): Promise<{ flowId: string; providerId: string; authType: "oauth" | "api_key"; status: "running" | "succeeded" | "failed" | "cancelled"; notification?: Record<string, unknown>; prompt?: { id: string; type: "text" | "secret" | "select" | "manual_code"; message: string; placeholder?: string; options?: Array<{ id: string; label: string; description?: string; }>; }; error?: string; }>;
++    getAuthFlow(flowId: string): ReturnType<RpcClient["beginAuthLogin"]>;
++    respondAuthFlow(flowId: string, promptId: string, response: string): ReturnType<RpcClient["beginAuthLogin"]>;
++    cancelAuthFlow(flowId: string): ReturnType<RpcClient["beginAuthLogin"]>;
++    logoutAuth(providerId: string, confirmed: boolean): Promise<void>;
+     /**
+      * Get text of last assistant message.
+      */
+diff --git a/dist/modes/rpc/rpc-client.js b/dist/modes/rpc/rpc-client.js
+index 8683f01..476ce75 100644
+--- a/dist/modes/rpc/rpc-client.js
++++ b/dist/modes/rpc/rpc-client.js
+@@ -319,6 +319,77 @@ export class RpcClient {
+         const response = await this.send({ type: "get_tree" });
+         return this.getData(response);
+     }
++    async getCapabilities() {
++        const response = await this.send({ type: "get_capabilities" });
++        return this.getData(response);
++    }
++    async navigateTree(targetId, options) {
++        const response = await this.send({ type: "navigate_tree", targetId, ...options });
++        return this.getData(response);
++    }
++    async abortBranchSummary() {
++        await this.send({ type: "abort_branch_summary" });
++    }
++    async reload() {
++        await this.send({ type: "reload" });
++    }
++    async setEntryLabel(targetId, label) {
++        await this.send({ type: "set_entry_label", targetId, label });
++    }
++    async getSafeSettings(scope) {
++        return this.getData(await this.send({ type: "get_safe_settings", scope }));
++    }
++    async setSafeSettings(scope, values) {
++        return this.getData(await this.send({ type: "set_safe_settings", scope, values }));
++    }
++    async getScopedModels(scope) {
++        return this.getData(await this.send({ type: "get_scoped_models", scope }));
++    }
++    async setScopedModels(scope, patterns) {
++        return this.getData(await this.send({ type: "set_scoped_models", scope, patterns }));
++    }
++    async listResumeSessions() {
++        return this.getData(await this.send({ type: "list_resume_sessions" }));
++    }
++    async resumeSession(sessionId) {
++        return this.getData(await this.send({ type: "resume_session", sessionId }));
++    }
++    async importSession(filename, content) {
++        return this.getData(await this.send({ type: "import_session", filename, content }));
++    }
++    async forkSession(entryId) {
++        return this.getData(await this.send({ type: "fork_session", entryId }));
++    }
++    async cloneSession() {
++        return this.getData(await this.send({ type: "clone_session" }));
++    }
++    async getProjectTrust() {
++        return this.getData(await this.send({ type: "get_project_trust" }));
++    }
++    async setProjectTrust(trusted, confirmed) {
++        return this.getData(await this.send({ type: "set_project_trust", trusted, confirmed }));
++    }
++    async getChangelog() {
++        return this.getData(await this.send({ type: "get_changelog" }));
++    }
++    async getAuthState() {
++        return this.getData(await this.send({ type: "get_auth_state" }));
++    }
++    async beginAuthLogin(providerId, authType) {
++        return this.getData(await this.send({ type: "begin_auth_login", providerId, authType }));
++    }
++    async getAuthFlow(flowId) {
++        return this.getData(await this.send({ type: "get_auth_flow", flowId }));
++    }
++    async respondAuthFlow(flowId, promptId, response) {
++        return this.getData(await this.send({ type: "respond_auth_flow", flowId, promptId, response }));
++    }
++    async cancelAuthFlow(flowId) {
++        return this.getData(await this.send({ type: "cancel_auth_flow", flowId }));
++    }
++    async logoutAuth(providerId, confirmed) {
++        await this.send({ type: "logout_auth", providerId, confirmed });
++    }
+     /**
+      * Get text of last assistant message.
+      */
+diff --git a/dist/modes/rpc/rpc-mode.js b/dist/modes/rpc/rpc-mode.js
+index 8567321..80013f9 100644
+--- a/dist/modes/rpc/rpc-mode.js
++++ b/dist/modes/rpc/rpc-mode.js
+@@ -11,6 +11,12 @@
+  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
+  */
+ import * as crypto from "node:crypto";
++import { existsSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
++import { basename, extname, isAbsolute, join, relative } from "node:path";
++import { parseSessionEntries, SessionManager } from "../../core/session-manager.js";
++import { resolveModelScopeWithDiagnostics } from "../../core/model-resolver.js";
++import { ProjectTrustStore } from "../../core/trust-manager.js";
++import { getChangelogPath, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.js";
+ import { flushRawStdout, takeOverStdout, waitForRawStdoutBackpressure, writeRawStdout, } from "../../core/output-guard.js";
+ import { killTrackedDetachedChildren } from "../../utils/shell.js";
+ import { theme } from "../interactive/theme/theme.js";
+@@ -19,9 +25,154 @@ import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
+  * Run in RPC mode.
+  * Listens for JSON commands on stdin, outputs events and responses on stdout.
+  */
++const SAFE_SETTINGS = {
++    steeringMode: ["steeringMode"], followUpMode: ["followUpMode"], hideThinkingBlock: ["hideThinkingBlock"],
++    showCacheMissNotices: ["showCacheMissNotices"], quietStartup: ["quietStartup"], collapseChangelog: ["collapseChangelog"],
++    enableSkillCommands: ["enableSkillCommands"], doubleEscapeAction: ["doubleEscapeAction"], treeFilterMode: ["treeFilterMode"],
++    showHardwareCursor: ["showHardwareCursor"], editorPaddingX: ["editorPaddingX"], outputPad: ["outputPad"],
++    autocompleteMaxVisible: ["autocompleteMaxVisible"], showImages: ["terminal", "showImages"],
++    imageWidthCells: ["terminal", "imageWidthCells"], clearOnShrink: ["terminal", "clearOnShrink"],
++    showTerminalProgress: ["terminal", "showTerminalProgress"], autoResizeImages: ["images", "autoResize"],
++    blockImages: ["images", "blockImages"], anthropicExtraUsageWarning: ["warnings", "anthropicExtraUsage"],
++};
++function safeSettings(settings) {
++    const values = {};
++    for (const [key, path] of Object.entries(SAFE_SETTINGS)) {
++        const value = path.length === 1 ? settings[path[0]] : settings[path[0]]?.[path[1]];
++        if (value !== undefined)
++            values[key] = value;
++    }
++    return values;
++}
++function applySafeSettings(manager, scope, values) {
++    for (const key of Object.keys(values)) {
++        if (!(key in SAFE_SETTINGS))
++            throw new Error(`Unsupported safe setting: ${key}`);
++    }
++    const apply = (settings) => {
++        for (const [key, value] of Object.entries(values)) {
++            const path = SAFE_SETTINGS[key];
++            if (path.length === 1) settings[path[0]] = value;
++            else {
++                settings[path[0]] ??= {};
++                settings[path[0]][path[1]] = value;
++            }
++        }
++    };
++    if (scope === "project") {
++        const settings = structuredClone(manager.projectSettings);
++        apply(settings);
++        for (const key of Object.keys(values)) {
++            const [field, nestedKey] = SAFE_SETTINGS[key];
++            manager.markProjectModified(field, nestedKey);
++        }
++        manager.saveProjectSettings(settings);
++    }
++    else {
++        apply(manager.globalSettings);
++        for (const key of Object.keys(values)) manager.markModified(SAFE_SETTINGS[key][0], SAFE_SETTINGS[key][1]);
++        manager.save();
++    }
++}
++function sanitizeChangelogMarkdown(markdown) {
++    return markdown.replace(/<[^>]*>/g, "").replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
++        .replace(/\[([^\]]+)\]\((?!https?:\/\/)[^)]+\)/gi, "$1").slice(0, 50000);
++}
++function assertContained(root, candidate) {
++    const rel = relative(root, candidate);
++    if (rel === "" || rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(rel))
++        throw new Error("Session target is outside the active project session root");
++}
+ export async function runRpcMode(runtimeHost) {
+     takeOverStdout();
+     let session = runtimeHost.session;
++    const resumeSessions = new Map();
++    const resumeSessionIds = new Map();
++    const authFlows = new Map();
++    const authFlowSnapshot = (flow) => ({
++        flowId: flow.id,
++        providerId: flow.providerId,
++        authType: flow.authType,
++        status: flow.status,
++        notification: flow.notification,
++        prompt: flow.prompt,
++        error: flow.error,
++    });
++    const requireAuthFlow = (flowId) => {
++        const flow = authFlows.get(flowId);
++        if (!flow)
++            throw new Error("Unknown or expired authentication flow");
++        return flow;
++    };
++    const startAuthFlow = (providerId, authType) => {
++        const provider = session.modelRuntime.getProvider(providerId);
++        if (!provider)
++            throw new Error("Unknown authentication provider");
++        if (authType !== "oauth" && authType !== "api_key")
++            throw new Error("Unsupported authentication type");
++        if (authType === "oauth" ? !provider.auth.oauth : !provider.auth.apiKey?.login)
++            throw new Error("The selected authentication method is unavailable");
++        for (const flow of authFlows.values()) {
++            if (flow.status === "running")
++                throw new Error("An authentication flow is already running");
++        }
++        const flow = {
++            id: crypto.randomUUID(), providerId, authType, status: "running",
++            notification: undefined, prompt: undefined, error: undefined,
++            pending: undefined, controller: new AbortController(),
++        };
++        authFlows.set(flow.id, flow);
++        void (async () => {
++            try {
++                await session.modelRuntime.login(providerId, authType, {
++                    signal: flow.controller.signal,
++                    notify: (event) => {
++                        if (event.type === "auth_url")
++                            flow.notification = { type: event.type, url: event.url, instructions: event.instructions };
++                        else if (event.type === "device_code")
++                            flow.notification = { type: event.type, userCode: event.userCode, verificationUri: event.verificationUri, expiresInSeconds: event.expiresInSeconds };
++                        else if (event.type === "info")
++                            flow.notification = { type: event.type, message: event.message, links: event.links?.map(({ url, label }) => ({ url, label })) };
++                        else
++                            flow.notification = { type: "progress", message: event.message };
++                    },
++                    prompt: (prompt) => {
++                        if (flow.controller.signal.aborted)
++                            return Promise.reject(new Error("Login cancelled"));
++                        const promptId = crypto.randomUUID();
++                        flow.prompt = prompt.type === "select"
++                            ? { id: promptId, type: prompt.type, message: prompt.message, options: prompt.options.map(({ id, label, description }) => ({ id, label, description })) }
++                            : { id: promptId, type: prompt.type, message: prompt.message, placeholder: prompt.placeholder };
++                        return new Promise((resolve, reject) => {
++                            const abort = () => {
++                                if (flow.pending?.id !== promptId)
++                                    return;
++                                flow.pending = undefined;
++                                flow.prompt = undefined;
++                                reject(new Error("Login cancelled"));
++                            };
++                            flow.pending = { id: promptId, resolve, reject, abort };
++                            flow.controller.signal.addEventListener("abort", abort, { once: true });
++                            prompt.signal?.addEventListener("abort", abort, { once: true });
++                        });
++                    },
++                });
++                await session.modelRuntime.getAvailable();
++                flow.status = "succeeded";
++                flow.prompt = undefined;
++            }
++            catch (cause) {
++                flow.status = flow.controller.signal.aborted ? "cancelled" : "failed";
++                flow.error = flow.status === "failed" ? (cause instanceof Error ? cause.message : String(cause)) : undefined;
++                flow.prompt = undefined;
++            }
++            finally {
++                flow.pending = undefined;
++                setTimeout(() => authFlows.delete(flow.id), 300000).unref?.();
++            }
++        })();
++        return authFlowSnapshot(flow);
++    };
+     let unsubscribe;
+     let unsubscribeBackpressure;
+     const output = (obj) => {
+@@ -514,6 +665,222 @@ export async function runRpcMode(runtimeHost) {
+                 const sessionManager = session.sessionManager;
+                 return success(id, "get_tree", { tree: sessionManager.getTree(), leafId: sessionManager.getLeafId() });
+             }
++            case "get_capabilities": {
++                return success(id, "get_capabilities", {
++                    protocolVersion: 1,
++                    capabilities: ["navigate_tree", "abort_branch_summary", "reload", "set_entry_label", "safe_settings", "scoped_models", "session_management", "project_trust", "changelog", "auth"],
++                });
++            }
++            case "navigate_tree": {
++                const result = await session.navigateTree(command.targetId, {
++                    summarize: command.summarize,
++                    customInstructions: command.customInstructions,
++                    replaceInstructions: command.replaceInstructions,
++                    label: command.label,
++                });
++                return success(id, "navigate_tree", {
++                    ...result,
++                    leafId: session.sessionManager.getLeafId(),
++                });
++            }
++            case "abort_branch_summary": {
++                session.abortBranchSummary();
++                return success(id, "abort_branch_summary");
++            }
++            case "reload": {
++                await session.reload();
++                return success(id, "reload");
++            }
++            case "set_entry_label": {
++                session.sessionManager.appendLabelChange(command.targetId, command.label?.trim() || undefined);
++                return success(id, "set_entry_label");
++            }
++            case "get_safe_settings": {
++                if (command.scope !== "global" && command.scope !== "project") throw new Error("Invalid settings scope");
++                const manager = runtimeHost.services.settingsManager;
++                const settings = command.scope === "global" ? manager.getGlobalSettings() : manager.getProjectSettings();
++                return success(id, "get_safe_settings", { scope: command.scope, values: safeSettings(settings) });
++            }
++            case "set_safe_settings": {
++                if (session.isStreaming || session.isCompacting) throw new Error("Wait for the current response or compaction to finish");
++                if (command.scope !== "global" && command.scope !== "project") throw new Error("Invalid settings scope");
++                const manager = runtimeHost.services.settingsManager;
++                applySafeSettings(manager, command.scope, command.values ?? {});
++                await manager.flush();
++                session.syncQueueModesFromSettings();
++                return success(id, "set_safe_settings", { scope: command.scope, values: safeSettings(command.scope === "global" ? manager.getGlobalSettings() : manager.getProjectSettings()) });
++            }
++            case "get_scoped_models":
++            case "set_scoped_models": {
++                if (command.scope !== "global" && command.scope !== "project") throw new Error("Invalid settings scope");
++                if (command.type === "set_scoped_models" && (session.isStreaming || session.isCompacting)) throw new Error("Wait for the current response or compaction to finish");
++                const manager = runtimeHost.services.settingsManager;
++                if (command.type === "set_scoped_models") {
++                    if (!Array.isArray(command.patterns) || command.patterns.some((pattern) => typeof pattern !== "string" || pattern.length > 200)) throw new Error("Invalid enabled model patterns");
++                    const patterns = command.patterns.length === 0 ? undefined : [...command.patterns];
++                    if (command.scope === "global") manager.setEnabledModels(patterns);
++                    else manager.updateProjectSettings("enabledModels", (settings) => { settings.enabledModels = patterns; });
++                    await manager.flush();
++                }
++                const scopedSettings = command.scope === "global" ? manager.getGlobalSettings() : manager.getProjectSettings();
++                const patterns = scopedSettings.enabledModels ?? [];
++                const resolved = await resolveModelScopeWithDiagnostics(patterns, session.modelRuntime);
++                if (command.type === "set_scoped_models") {
++                    const effectivePatterns = manager.getEnabledModels() ?? [];
++                    const effective = await resolveModelScopeWithDiagnostics(effectivePatterns, session.modelRuntime);
++                    session.setScopedModels(effective.scopedModels);
++                }
++                return success(id, command.type, {
++                    scope: command.scope,
++                    patterns,
++                    models: resolved.scopedModels.map(({ model, thinkingLevel }) => ({ provider: model.provider, id: model.id, name: model.name, thinkingLevel })),
++                    diagnostics: resolved.diagnostics,
++                });
++            }
++            case "list_resume_sessions": {
++                const root = realpathSync(session.sessionManager.getSessionDir());
++                const infos = (await SessionManager.list(runtimeHost.cwd, root)).filter((info) => existsSync(info.path));
++                const current = session.sessionFile && existsSync(session.sessionFile) ? realpathSync(session.sessionFile) : undefined;
++                const sessions = infos.map((info) => {
++                    const target = realpathSync(info.path);
++                    assertContained(root, target);
++                    const opaqueId = resumeSessionIds.get(target) ?? crypto.randomUUID();
++                    resumeSessionIds.set(target, opaqueId);
++                    resumeSessions.set(opaqueId, target);
++                    return { id: opaqueId, sessionId: info.id, name: info.name, createdAt: info.created.toISOString(), modifiedAt: info.modified.toISOString(), messageCount: info.messageCount, current: target === current };
++                });
++                return success(id, "list_resume_sessions", { sessions });
++            }
++            case "resume_session": {
++                if (session.isStreaming || session.isCompacting) throw new Error("Wait for the current response or compaction to finish");
++                const target = resumeSessions.get(command.sessionId);
++                if (!target) throw new Error("Unknown or expired session id");
++                const root = realpathSync(session.sessionManager.getSessionDir());
++                assertContained(root, target);
++                const result = await runtimeHost.switchSession(target, { cwdOverride: runtimeHost.cwd });
++                if (!result.cancelled) await rebindSession();
++                return success(id, "resume_session", { cancelled: result.cancelled, sessionId: session.sessionId });
++            }
++            case "import_session": {
++                if (session.isStreaming || session.isCompacting) throw new Error("Wait for the current response or compaction to finish");
++                if (typeof command.content !== "string" || Buffer.byteLength(command.content, "utf8") > 1048576) throw new Error("Imported session exceeds the byte limit");
++                const lines = command.content.split("\n");
++                if (lines.length > 20000) throw new Error("Imported session exceeds the line limit");
++                const entries = parseSessionEntries(command.content);
++                if (entries.length === 0 || entries.length > 20000 || entries[0]?.type !== "session") throw new Error("Invalid Pi session JSONL");
++                if (typeof command.filename !== "string" || basename(command.filename) !== command.filename || extname(command.filename).toLowerCase() !== ".jsonl") throw new Error("Import filename must be a plain .jsonl filename");
++                const importedEntries = entries.map((entry, index) => index === 0 ? { ...entry, id: crypto.randomUUID() } : entry);
++                const importedContent = `${importedEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
++                if (Buffer.byteLength(importedContent, "utf8") > 1048576) throw new Error("Imported session exceeds the byte limit");
++                const root = realpathSync(session.sessionManager.getSessionDir());
++                const target = join(root, `d4-import-${crypto.randomUUID()}-${command.filename}`);
++                assertContained(root, target);
++                writeFileSync(target, importedContent, { encoding: "utf8", flag: "wx", mode: 0o600 });
++                let result;
++                try {
++                    result = await runtimeHost.importFromJsonl(target, runtimeHost.cwd);
++                }
++                catch (error) {
++                    unlinkSync(target);
++                    throw error;
++                }
++                if (result.cancelled) unlinkSync(target);
++                else await rebindSession();
++                return success(id, "import_session", { cancelled: result.cancelled, sessionId: session.sessionId });
++            }
++            case "fork_session": {
++                if (session.isStreaming || session.isCompacting) throw new Error("Wait for the current response or compaction to finish");
++                const result = await runtimeHost.fork(command.entryId);
++                if (!result.cancelled) await rebindSession();
++                return success(id, "fork_session", { cancelled: result.cancelled, sessionId: session.sessionId, editorText: result.selectedText });
++            }
++            case "clone_session": {
++                if (session.isStreaming || session.isCompacting) throw new Error("Wait for the current response or compaction to finish");
++                const leafId = session.sessionManager.getLeafId();
++                if (!leafId) throw new Error("Cannot clone session: no current entry selected");
++                const result = await runtimeHost.fork(leafId, { position: "at" });
++                if (!result.cancelled) await rebindSession();
++                return success(id, "clone_session", { cancelled: result.cancelled, sessionId: session.sessionId });
++            }
++            case "get_project_trust": {
++                const cwd = realpathSync(runtimeHost.cwd);
++                const entry = new ProjectTrustStore(runtimeHost.services.agentDir).getEntry(cwd);
++                return success(id, "get_project_trust", { decision: entry?.path === cwd ? entry.decision : null });
++            }
++            case "set_project_trust": {
++                if (command.trusted === true && command.confirmed !== true) throw new Error("Trusting a project requires explicit confirmation");
++                if (typeof command.trusted !== "boolean") throw new Error("Invalid trust decision");
++                const cwd = realpathSync(runtimeHost.cwd);
++                const store = new ProjectTrustStore(runtimeHost.services.agentDir);
++                store.set(cwd, command.trusted);
++                const entry = store.getEntry(cwd);
++                return success(id, "set_project_trust", { decision: entry?.path === cwd ? entry.decision : null });
++            }
++            case "get_changelog": {
++                const entries = parseChangelog(getChangelogPath()).slice(0, 100).reverse().map((entry) => ({
++                    version: `${entry.major}.${entry.minor}.${entry.patch}`,
++                    markdown: sanitizeChangelogMarkdown(normalizeChangelogLinks(entry.content, entry)),
++                }));
++                return success(id, "get_changelog", { entries });
++            }
++            case "get_auth_state": {
++                await session.modelRuntime.getAvailable();
++                const credentials = await session.modelRuntime.listCredentials();
++                const stored = new Map(credentials.map((credential) => [credential.providerId, credential.type]));
++                const providers = session.modelRuntime.getProviders().map((provider) => {
++                    const status = session.modelRuntime.getProviderAuthStatus(provider.id);
++                    const methods = [];
++                    if (provider.auth.oauth)
++                        methods.push("oauth");
++                    if (provider.auth.apiKey?.login)
++                        methods.push("api_key");
++                    return {
++                        id: provider.id,
++                        name: provider.name,
++                        methods,
++                        configured: status.configured,
++                        storedCredential: stored.has(provider.id),
++                        credentialType: stored.get(provider.id),
++                    };
++                }).filter((provider) => provider.methods.length > 0 || provider.configured)
++                    .sort((a, b) => a.name.localeCompare(b.name));
++                return success(id, "get_auth_state", { providers });
++            }
++            case "begin_auth_login": {
++                if (typeof command.providerId !== "string")
++                    throw new Error("Invalid authentication provider");
++                return success(id, "begin_auth_login", startAuthFlow(command.providerId, command.authType));
++            }
++            case "get_auth_flow": {
++                return success(id, "get_auth_flow", authFlowSnapshot(requireAuthFlow(command.flowId)));
++            }
++            case "respond_auth_flow": {
++                const flow = requireAuthFlow(command.flowId);
++                if (typeof command.response !== "string" || command.response.length > 100000)
++                    throw new Error("Invalid authentication response");
++                if (!flow.pending || flow.pending.id !== command.promptId)
++                    throw new Error("Authentication prompt is no longer active");
++                const pending = flow.pending;
++                flow.pending = undefined;
++                flow.prompt = undefined;
++                pending.resolve(command.response);
++                return success(id, "respond_auth_flow", authFlowSnapshot(flow));
++            }
++            case "cancel_auth_flow": {
++                const flow = requireAuthFlow(command.flowId);
++                flow.controller.abort();
++                return success(id, "cancel_auth_flow", authFlowSnapshot(flow));
++            }
++            case "logout_auth": {
++                if (command.confirmed !== true || typeof command.providerId !== "string")
++                    throw new Error("Logout requires explicit confirmation");
++                const credentials = await session.modelRuntime.listCredentials();
++                if (!credentials.some((credential) => credential.providerId === command.providerId))
++                    throw new Error("Pi has no stored credential for that provider");
++                await session.modelRuntime.logout(command.providerId);
++                await session.modelRuntime.getAvailable();
++                return success(id, "logout_auth");
++            }
+             case "get_last_assistant_text": {
+                 const text = session.getLastAssistantText();
+                 return success(id, "get_last_assistant_text", { text });
+diff --git a/dist/modes/rpc/rpc-types.d.ts b/dist/modes/rpc/rpc-types.d.ts
+index b772bc7..a8393cc 100644
+--- a/dist/modes/rpc/rpc-types.d.ts
++++ b/dist/modes/rpc/rpc-types.d.ts
+@@ -117,6 +117,93 @@ export type RpcCommand = {
+ } | {
+     id?: string;
+     type: "get_tree";
++} | {
++    id?: string;
++    type: "get_capabilities";
++} | {
++    id?: string;
++    type: "navigate_tree";
++    targetId: string;
++    summarize?: boolean;
++    customInstructions?: string;
++    replaceInstructions?: boolean;
++    label?: string;
++} | {
++    id?: string;
++    type: "abort_branch_summary";
++} | {
++    id?: string;
++    type: "reload";
++} | {
++    id?: string;
++    type: "set_entry_label";
++    targetId: string;
++    label?: string;
++} | {
++    id?: string;
++    type: "get_safe_settings";
++    scope: "global" | "project";
++} | {
++    id?: string;
++    type: "set_safe_settings";
++    scope: "global" | "project";
++    values: Record<string, unknown>;
++} | {
++    id?: string;
++    type: "get_scoped_models";
++    scope: "global" | "project";
++} | {
++    id?: string;
++    type: "set_scoped_models";
++    scope: "global" | "project";
++    patterns: string[];
++} | {
++    id?: string;
++    type: "list_resume_sessions";
++} | {
++    id?: string;
++    type: "resume_session";
++    sessionId: string;
++} | {
++    id?: string;
++    type: "import_session";
++    filename: string;
++    content: string;
++} | {
++    id?: string;
++    type: "fork_session";
++    entryId: string;
++} | {
++    id?: string;
++    type: "clone_session" | "get_project_trust" | "get_changelog";
++} | {
++    id?: string;
++    type: "set_project_trust";
++    trusted: boolean;
++    confirmed?: boolean;
++} | {
++    id?: string;
++    type: "get_auth_state";
++} | {
++    id?: string;
++    type: "begin_auth_login";
++    providerId: string;
++    authType: "oauth" | "api_key";
++} | {
++    id?: string;
++    type: "get_auth_flow" | "cancel_auth_flow";
++    flowId: string;
++} | {
++    id?: string;
++    type: "respond_auth_flow";
++    flowId: string;
++    promptId: string;
++    response: string;
++} | {
++    id?: string;
++    type: "logout_auth";
++    providerId: string;
++    confirmed: boolean;
+ } | {
+     id?: string;
+     type: "get_last_assistant_text";
+@@ -345,6 +409,90 @@ export type RpcResponse = {
+         tree: SessionTreeNode[];
+         leafId: string | null;
+     };
++} | {
++    id?: string;
++    type: "response";
++    command: "get_capabilities";
++    success: true;
++    data: {
++        protocolVersion: 1;
++        capabilities: Array<"navigate_tree" | "abort_branch_summary" | "reload" | "set_entry_label" | "safe_settings" | "scoped_models" | "session_management" | "project_trust" | "changelog" | "auth">;
++    };
++} | {
++    id?: string;
++    type: "response";
++    command: "navigate_tree";
++    success: true;
++    data: {
++        editorText?: string;
++        cancelled: boolean;
++        aborted?: boolean;
++        summaryEntry?: SessionEntry;
++        leafId: string | null;
++    };
++} | {
++    id?: string;
++    type: "response";
++    command: "abort_branch_summary" | "reload" | "set_entry_label";
++    success: true;
++} | {
++    id?: string;
++    type: "response";
++    command: "get_safe_settings" | "set_safe_settings";
++    success: true;
++    data: { scope: "global" | "project"; values: Record<string, unknown>; };
++} | {
++    id?: string;
++    type: "response";
++    command: "get_scoped_models" | "set_scoped_models";
++    success: true;
++    data: {
++        scope: "global" | "project";
++        patterns: string[];
++        models: Array<{ provider: string; id: string; name: string; thinkingLevel?: string; }>;
++        diagnostics: Array<{ type: "warning"; code: "no-match" | "invalid-thinking-level"; message: string; pattern: string; }>;
++    };
++} | {
++    id?: string;
++    type: "response";
++    command: "list_resume_sessions";
++    success: true;
++    data: { sessions: Array<{ id: string; sessionId: string; name?: string; createdAt: string; modifiedAt: string; messageCount: number; current: boolean; }>; };
++} | {
++    id?: string;
++    type: "response";
++    command: "resume_session" | "import_session" | "fork_session" | "clone_session";
++    success: true;
++    data: { cancelled: boolean; sessionId: string; editorText?: string; };
++} | {
++    id?: string;
++    type: "response";
++    command: "get_project_trust" | "set_project_trust";
++    success: true;
++    data: { decision: boolean | null; };
++} | {
++    id?: string;
++    type: "response";
++    command: "get_changelog";
++    success: true;
++    data: { entries: Array<{ version: string; markdown: string; }>; };
++} | {
++    id?: string;
++    type: "response";
++    command: "get_auth_state";
++    success: true;
++    data: { providers: Array<{ id: string; name: string; methods: Array<"oauth" | "api_key">; configured: boolean; storedCredential: boolean; credentialType?: "oauth" | "api_key"; }>; };
++} | {
++    id?: string;
++    type: "response";
++    command: "begin_auth_login" | "get_auth_flow" | "respond_auth_flow" | "cancel_auth_flow";
++    success: true;
++    data: { flowId: string; providerId: string; authType: "oauth" | "api_key"; status: "running" | "succeeded" | "failed" | "cancelled"; notification?: Record<string, unknown>; prompt?: { id: string; type: "text" | "secret" | "select" | "manual_code"; message: string; placeholder?: string; options?: Array<{ id: string; label: string; description?: string; }>; }; error?: string; };
++} | {
++    id?: string;
++    type: "response";
++    command: "logout_auth";
++    success: true;
+ } | {
+     id?: string;
+     type: "response";

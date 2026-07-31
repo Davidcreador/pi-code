@@ -121,6 +121,37 @@ function createProviderServiceHarness() {
       });
     },
     rollbackConversation: () => unsupported(),
+    withPiSessionLock: (_threadId, effect) => effect,
+    getPiActiveTranscript: () => Effect.succeed({ messages: [], activities: [] }),
+    getPiSessionTree: () => unsupported(),
+    navigatePiSessionTree: () => unsupported(),
+    abortPiBranchSummary: () => unsupported(),
+    setPiEntryLabel: () => unsupported(),
+    reloadPiResources: () => unsupported(),
+    compactPiSession: () => unsupported(),
+    getPiSessionStateAndStats: () => unsupported(),
+    setPiSessionName: () => unsupported(),
+    getPiLastAssistantText: () => unsupported(),
+    exportPiSessionHtml: () => unsupported(),
+    getPiSettings: () => unsupported(),
+    updatePiSettings: () => unsupported(),
+    getPiScopedModels: () => unsupported(),
+    updatePiScopedModels: () => unsupported(),
+    listPiResumeSessions: () => unsupported(),
+    resumePiSession: () => unsupported(),
+    importPiSession: () => unsupported(),
+    forkPiSession: () => unsupported(),
+    clonePiSession: () => unsupported(),
+    getPiTrust: () => unsupported(),
+    setPiTrust: () => unsupported(),
+    getPiChangelog: () => unsupported(),
+    getPiAuthState: () => unsupported(),
+    beginPiAuthLogin: () => unsupported(),
+    getPiAuthFlow: () => unsupported(),
+    respondPiAuthFlow: () => unsupported(),
+    cancelPiAuthFlow: () => unsupported(),
+    logoutPiAuth: () => unsupported(),
+    sharePiSession: () => unsupported(),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -318,6 +349,101 @@ describe("ProviderRuntimeIngestion", () => {
       drain,
     };
   }
+
+  it("reconciles a resumed Pi session when the projection drifted", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("stale-activity"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: asEventId("stale-activity"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "stale",
+          payload: {},
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    harness.emit({
+      type: "session.started",
+      eventId: asEventId("evt-pi-resumed"),
+      provider: ProviderDriverKind.make("pi"),
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      payload: { resume: { schemaVersion: 1, sessionId: "session" } },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "ready" && entry.activities.length === 0,
+    );
+    expect(thread.activities).toEqual([]);
+  });
+
+  it("does not erase an unsent user message while a Pi session resumes", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("pending-pi-turn"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("pending-pi-message"),
+          role: "user",
+          text: "pending",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("stale-pending-activity"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: asEventId("stale-pending-activity"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "stale",
+          payload: {},
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    harness.emit({
+      type: "session.started",
+      eventId: asEventId("evt-pi-resumed-pending"),
+      provider: ProviderDriverKind.make("pi"),
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      payload: { resume: { schemaVersion: 1, sessionId: "session" } },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "ready" &&
+        entry.activities.length === 0 &&
+        entry.messages.some((message) => message.text === "pending"),
+    );
+    expect(thread.messages.map((message) => message.text)).toContain("pending");
+    expect(thread.activities).toEqual([]);
+  });
 
   it("maps turn started/completed events into thread session updates", async () => {
     const harness = await createHarness();

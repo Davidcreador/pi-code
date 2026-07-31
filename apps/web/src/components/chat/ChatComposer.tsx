@@ -37,6 +37,7 @@ import {
   clampCollapsedComposerCursor,
   type ComposerTrigger,
   collapseExpandedComposerCursor,
+  composerSubmissionRequiresProvider,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   replaceTextRange,
@@ -107,6 +108,11 @@ import { buildExpandedImagePreview, type ExpandedImagePreview } from "./Expanded
 import { basenameOfPath } from "../../pierre-icons";
 import { cn, randomUUID } from "~/lib/utils";
 import { Separator } from "../ui/separator";
+import {
+  NATIVE_SLASH_COMMANDS,
+  isNativeSlashCommand,
+  type NativeSlashCommand,
+} from "../../nativeSlashCommands";
 
 function ComposerCommandMenuLayer(props: { anchor: HTMLElement | null; children: ReactNode }) {
   const [position, setPosition] = useState<{
@@ -544,7 +550,11 @@ export interface ChatComposerProps {
     isLastQuestion: boolean;
     canAdvance: boolean;
     customAnswer: string;
-    activeQuestion: { id: string; multiSelect?: boolean | undefined } | null;
+    activeQuestion: {
+      id: string;
+      multiSelect?: boolean | undefined;
+      placeholder?: string | undefined;
+    } | null;
   } | null;
   activePendingResolvedAnswers: Record<string, unknown> | null;
   activePendingIsResponding: boolean;
@@ -589,6 +599,7 @@ export interface ChatComposerProps {
 
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
+  onNativeSlashCommand: (command: NativeSlashCommand) => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -676,6 +687,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerTerminalContextsRef,
     composerElementContextsRef,
     onSend,
+    onNativeSlashCommand,
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
@@ -1056,39 +1068,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }));
     }
     if (composerTrigger.kind === "slash-command") {
-      const builtInSlashCommandItems = [
-        {
-          id: "slash:model",
-          type: "slash-command",
-          command: "model",
-          label: "/model",
-          description: "Switch response model for this thread",
-        },
-        {
-          id: "slash:plan",
-          type: "slash-command",
-          command: "plan",
-          label: "/plan",
-          description: "Switch this thread into plan mode",
-        },
-        {
-          id: "slash:default",
-          type: "slash-command",
-          command: "default",
-          label: "/default",
-          description: "Switch this thread back to normal build mode",
-        },
-      ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
-      const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? []).map(
-        (command) => ({
+      const builtInSlashCommandItems = NATIVE_SLASH_COMMANDS.map(({ command, description }) => ({
+        id: `slash:${command}`,
+        type: "slash-command" as const,
+        command,
+        label: `/${command}`,
+        description,
+      }));
+      const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? [])
+        .filter((command) => !isNativeSlashCommand(command.name))
+        .map((command) => ({
           id: `provider-slash-command:${selectedProvider}:${command.name}`,
           type: "provider-slash-command" as const,
           provider: selectedProvider,
           command,
           label: `/${command.name}`,
           description: command.description ?? command.input?.hint ?? "Run provider command",
-        }),
-      );
+        }));
       const query = composerTrigger.query.trim().toLowerCase();
       const slashCommandItems = [...builtInSlashCommandItems, ...providerSlashCommandItems];
       if (!query) {
@@ -1241,12 +1237,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         : null,
     [activePendingIsResponding, activePendingProgress, activePendingResolvedAnswers],
   );
+  const submissionRequiresProvider = composerSubmissionRequiresProvider(
+    composerSendState.trimmedPrompt,
+    composerImages.length > 0 ||
+      composerTerminalContexts.length > 0 ||
+      composerElementContexts.length > 0 ||
+      composerPreviewAnnotations.length > 0 ||
+      composerReviewComments.length > 0,
+  );
   const collapsedComposerPrimaryActionDisabled =
     phase === "running" ||
     isSendBusy ||
     isSendDisabled ||
     isConnecting ||
-    noProviderAvailable ||
+    (noProviderAvailable && submissionRequiresProvider) ||
     projectSelectionRequired ||
     environmentUnavailable !== null ||
     !composerSendState.hasSendableContent;
@@ -1698,7 +1702,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }
           return;
         }
-        void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
+        if (item.command === "plan" || item.command === "default") {
+          void handleInteractionModeChange(item.command);
+        } else {
+          onNativeSlashCommand(item.command);
+        }
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
         });
@@ -1817,7 +1825,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const submitComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
-      if (noProviderAvailable || isSendDisabled) {
+      if ((noProviderAvailable && submissionRequiresProvider) || isSendDisabled) {
         event?.preventDefault();
         return;
       }
@@ -1832,6 +1840,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       noProviderAvailable,
       onSend,
       shouldBlurMobileComposerOnSubmit,
+      submissionRequiresProvider,
     ],
   );
   const expandMobileComposer = useCallback(() => {
@@ -2998,7 +3007,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   isComposerApprovalState
                     ? (activePendingApproval?.detail ?? "Resolve this approval request to continue")
                     : activePendingProgress
-                      ? "Type your own answer, or leave this blank to use the selected option"
+                      ? (activePendingProgress.activeQuestion?.placeholder ??
+                        "Type your own answer, or leave this blank to use the selected option")
                       : showPlanFollowUpPrompt && activeProposedPlan
                         ? "Add feedback to refine the plan, or leave this blank to implement it"
                         : projectSelectionRequired
@@ -3158,7 +3168,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   isConnecting={isConnecting}
                   isEnvironmentUnavailable={
                     environmentUnavailable !== null ||
-                    noProviderAvailable ||
+                    (noProviderAvailable && submissionRequiresProvider) ||
                     projectSelectionRequired
                   }
                   isPreparingWorktree={isPreparingWorktree}

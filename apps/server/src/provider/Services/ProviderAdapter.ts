@@ -11,17 +11,19 @@ import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
   ProviderDriverKind,
-  ProviderUserInputAnswers,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
-  ThreadId,
   ProviderTurnStartResult,
+  ProviderUserInputAnswers,
+  ThreadId,
   TurnId,
 } from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
+
+import type { PiNativeAdapterShape } from "./PiNativeAdapter.ts";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
 
@@ -113,6 +115,8 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  readonly piNative?: PiNativeAdapterShape<TError>;
 
   /**
    * Stop all sessions owned by this adapter.

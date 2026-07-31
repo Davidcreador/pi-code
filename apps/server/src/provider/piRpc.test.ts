@@ -13,6 +13,11 @@ import { PiRpcError, spawnPiRpc } from "./piRpc.ts";
  */
 const FAKE_PI_SCRIPT = `
 process.stdin.setEncoding("utf8");
+if (process.env.HOLD_TERMINATION === "1") {
+  process.on("SIGTERM", () => {
+    process.stdout.write(JSON.stringify({ type: "termination_started" }) + "\\n");
+  });
+}
 let buf = "";
 process.stdin.on("data", (chunk) => {
   buf += chunk;
@@ -22,7 +27,9 @@ process.stdin.on("data", (chunk) => {
     buf = buf.slice(i + 1);
     if (!line.trim()) continue;
     const cmd = JSON.parse(line);
-    if (cmd.type === "ping") {
+    if (cmd.type === "ready") {
+      process.stdout.write(JSON.stringify({ type: "response", id: cmd.id, command: "ready", success: true, data: {} }) + "\\n");
+    } else if (cmd.type === "ping") {
       process.stdout.write(JSON.stringify({ type: "response", id: cmd.id, command: "ping", success: true, data: { pong: true } }) + "\\n");
       process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
     } else if (cmd.type === "boom") {
@@ -33,6 +40,8 @@ process.stdin.on("data", (chunk) => {
       setTimeout(() => process.stdout.write(payload.slice(5)), 30);
     } else if (cmd.type === "die") {
       process.exit(3);
+    } else if (cmd.type === "release_termination") {
+      process.exit(0);
     }
   }
 });
@@ -42,6 +51,13 @@ const spawnFakePi = spawnPiRpc({
   binaryPath: process.execPath,
   args: ["-e", FAKE_PI_SCRIPT],
   cwd: process.cwd(),
+});
+
+const spawnHeldFakePi = spawnPiRpc({
+  binaryPath: process.execPath,
+  args: ["-e", FAKE_PI_SCRIPT],
+  cwd: process.cwd(),
+  environment: { ...process.env, HOLD_TERMINATION: "1" },
 });
 
 const layer = NodeServices.layer;
@@ -83,6 +99,50 @@ it.layer(layer)("piRpc", (it) => {
           .pipe(Effect.flip, Effect.timeout("10 seconds"));
         assert.instanceOf(result, PiRpcError);
         assert.equal(result.detail, "kaboom");
+      }),
+    ),
+  );
+
+  it.effect("finalizes pending requests before termination returns", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const rpc = yield* spawnFakePi;
+        const pending = yield* rpc.request({ type: "never-answered" }).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+
+        yield* rpc.terminate.pipe(Effect.timeout("10 seconds"));
+        const result = yield* Fiber.awaitAll([pending]).pipe(Effect.timeout("10 seconds"));
+        assert.equal(result[0]?._tag, "Failure");
+        yield* rpc.terminate.pipe(Effect.timeout("10 seconds"));
+      }),
+    ),
+  );
+
+  it.effect("finishes exit cleanup across interrupted and concurrent termination", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const rpc = yield* spawnHeldFakePi;
+        yield* rpc.request({ type: "ready" }).pipe(Effect.timeout("10 seconds"));
+        const pending = yield* rpc.request({ type: "never-answered" }).pipe(Effect.forkScoped);
+        const firstTermination = yield* rpc.terminate.pipe(Effect.forkScoped);
+        const started = yield* rpc.events.pipe(
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.timeout("10 seconds"),
+        );
+        assert.deepEqual(started, [{ type: "termination_started" }]);
+        yield* Fiber.interrupt(firstTermination);
+
+        const secondTermination = yield* rpc.terminate.pipe(Effect.forkScoped);
+        const thirdTermination = yield* rpc.terminate.pipe(Effect.forkScoped);
+        yield* rpc.send({ type: "release_termination" });
+        const terminations = yield* Fiber.awaitAll([secondTermination, thirdTermination]).pipe(
+          Effect.timeout("10 seconds"),
+        );
+        assert.equal(terminations[0]?._tag, "Success");
+        assert.equal(terminations[1]?._tag, "Success");
+        const result = yield* Fiber.awaitAll([pending]).pipe(Effect.timeout("10 seconds"));
+        assert.equal(result[0]?._tag, "Failure");
       }),
     ),
   );

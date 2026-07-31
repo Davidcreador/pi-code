@@ -71,6 +71,10 @@
       "types": "./src/state/orchestration.ts",
       "default": "./src/state/orchestration.ts"
     },
+    "./state/pi-native": {
+      "types": "./src/state/piNative.ts",
+      "default": "./src/state/piNative.ts"
+    },
     "./state/presentation": {
       "types": "./src/state/presentation.ts",
       "default": "./src/state/presentation.ts"

@@ -18,6 +18,7 @@ import { type ModelSelection, type PiSettings, TextGenerationError } from "@t3to
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
+import { resolvePiRuntimeCommand } from "../provider/piRuntime.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
@@ -40,8 +41,12 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
   environment?: NodeJS.ProcessEnv,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const binaryPath = piSettings.binaryPath.trim().length > 0 ? piSettings.binaryPath : "pi";
   const resolvedEnvironment = environment ?? process.env;
+  const cliRuntime = resolvePiRuntimeCommand({
+    piSettings,
+    entry: "cli",
+    environment: resolvedEnvironment,
+  });
 
   const runPiJson = <S extends Schema.Top>({
     operation,
@@ -64,8 +69,9 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       const rawOutput = yield* spawner
         .string(
           ChildProcess.make(
-            binaryPath,
+            cliRuntime.binaryPath,
             [
+              ...cliRuntime.argsPrefix,
               "-p",
               "--no-session",
               "--no-tools",
@@ -77,7 +83,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
               modelSelection.model,
               prompt,
             ],
-            { cwd, env: resolvedEnvironment },
+            { cwd, env: cliRuntime.environment ?? resolvedEnvironment },
           ),
         )
         .pipe(

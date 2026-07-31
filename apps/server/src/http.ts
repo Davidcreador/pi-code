@@ -275,6 +275,11 @@ export const assetRouteLayer = HttpRouter.add(
       headers: {
         "Cache-Control": "private, max-age=3600",
         "X-Content-Type-Options": "nosniff",
+        ...(asset.downloadName
+          ? {
+              "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(asset.downloadName)}`,
+            }
+          : {}),
       },
     }).pipe(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),

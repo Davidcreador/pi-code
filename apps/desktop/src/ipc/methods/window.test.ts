@@ -7,8 +7,9 @@ import type * as Electron from "electron";
 
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
+import * as ElectronApp from "../../electron/ElectronApp.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
-import { getLocalEnvironmentBootstraps, getWindowFullscreenState } from "./window.ts";
+import { getLocalEnvironmentBootstraps, getWindowFullscreenState, quitApp } from "./window.ts";
 
 const readyWslConfig: DesktopBackendManager.DesktopBackendStartConfig = {
   executablePath: "wsl.exe",
@@ -128,6 +129,22 @@ describe("getLocalEnvironmentBootstraps", () => {
       const result = yield* getLocalEnvironmentBootstraps.handler();
       assert.deepEqual(result, []);
     }).pipe(Effect.provide(DesktopBackendPool.layerTest([stoppedInstance])));
+  });
+});
+
+describe("quitApp", () => {
+  it.effect("requests the Electron application quit", () => {
+    let quitRequested = false;
+    const electronApp = ElectronApp.ElectronApp.of({
+      quit: Effect.sync(() => {
+        quitRequested = true;
+      }),
+    } as ElectronApp.ElectronApp["Service"]);
+
+    return Effect.gen(function* () {
+      yield* quitApp.handler(undefined);
+      assert.isTrue(quitRequested);
+    }).pipe(Effect.provide(Layer.succeed(ElectronApp.ElectronApp, electronApp)));
   });
 });
 

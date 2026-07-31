@@ -28,6 +28,7 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { reconcilePiTranscriptPreservingPendingUserMessage } from "../../provider/piTreeNavigation.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -1306,6 +1307,32 @@ const make = Effect.gen(function* () {
         });
 
       const now = event.createdAt;
+      if (
+        event.type === "session.started" &&
+        event.provider === "pi" &&
+        event.payload.resume !== undefined
+      ) {
+        yield* providerService.withPiSessionLock(
+          thread.id,
+          Effect.gen(function* () {
+            const [transcript, projected] = yield* Effect.all([
+              providerService.getPiActiveTranscript(thread.id),
+              getLoadedThreadDetail(),
+            ]);
+            if (projected === null) return;
+            yield* reconcilePiTranscriptPreservingPendingUserMessage(
+              thread.id,
+              transcript,
+              projected,
+              {
+                dispatch: orchestrationEngine.dispatch,
+                commandId: providerCommandId(event, "pi-transcript-reconcile"),
+                createdAt: Effect.succeed(now),
+              },
+            );
+          }),
+        );
+      }
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
       const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({

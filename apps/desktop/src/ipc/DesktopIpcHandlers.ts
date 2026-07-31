@@ -38,6 +38,7 @@ import {
   getWindowFullscreenState,
   openExternal,
   pickFolder,
+  quitApp,
   setTheme,
   showContextMenu,
 } from "./methods/window.ts";
@@ -80,6 +81,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
 
   yield* ipc.handle(pickFolder);
   yield* ipc.handle(confirm);
+  yield* ipc.handle(quitApp);
   yield* ipc.handle(setTheme);
   yield* ipc.handle(showContextMenu);
   yield* ipc.handle(openExternal);

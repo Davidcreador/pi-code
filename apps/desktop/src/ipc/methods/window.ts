@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
+import * as ElectronApp from "../../electron/ElectronApp.ts";
 import * as DesktopLocalEnvironmentAuth from "../../backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
@@ -225,6 +226,16 @@ export const confirm = DesktopIpc.makeIpcMethod({
     return yield* electronWindow.focusedMainOrFirst.pipe(
       Effect.flatMap((owner) => dialog.confirm({ owner, message })),
     );
+  }),
+});
+
+export const quitApp = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.QUIT_APP_CHANNEL,
+  payload: Schema.Void,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.window.quitApp")(function* () {
+    const electronApp = yield* ElectronApp.ElectronApp;
+    yield* electronApp.quit;
   }),
 });
 

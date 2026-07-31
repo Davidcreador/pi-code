@@ -66,6 +66,49 @@ describe("resolvePendingUserInputAnswer", () => {
     ).toEqual(["Server", "Web"]);
   });
 
+  it("uses an extension editor's prefilled answer until the user changes it", () => {
+    const editorQuestion = {
+      id: "editor",
+      header: "Extension",
+      question: "Edit text",
+      options: [],
+      multiSelect: false,
+      defaultAnswer: "  original text\n",
+      answerMode: "verbatim",
+    } as const;
+
+    expect(resolvePendingUserInputAnswer(editorQuestion, undefined)).toBe("  original text\n");
+    expect(derivePendingUserInputProgress([editorQuestion], {}, 0)).toMatchObject({
+      customAnswer: "  original text\n",
+      resolvedAnswer: "  original text\n",
+      canAdvance: true,
+      isComplete: true,
+    });
+  });
+
+  it("accepts empty and whitespace-only verbatim answers", () => {
+    const inputQuestion = {
+      id: "input",
+      header: "Extension",
+      question: "Enter text",
+      options: [],
+      multiSelect: false,
+      answerMode: "verbatim",
+    } as const;
+
+    expect(resolvePendingUserInputAnswer(inputQuestion, { customAnswer: "" })).toBe("");
+    expect(
+      buildPendingUserInputAnswers([inputQuestion], { input: { customAnswer: "   " } }),
+    ).toEqual({ input: "   " });
+    expect(
+      derivePendingUserInputProgress([inputQuestion], { input: { customAnswer: "" } }, 0),
+    ).toMatchObject({ canAdvance: true, isComplete: true });
+  });
+
+  it("keeps blank generic answers unanswered", () => {
+    expect(resolvePendingUserInputAnswer(singleSelectQuestion, { customAnswer: "   " })).toBeNull();
+  });
+
   it("clears the preset selection when a custom answer is entered", () => {
     expect(
       setPendingUserInputCustomAnswer(

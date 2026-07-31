@@ -1,8 +1,8 @@
 /**
  * PiProvider — snapshot probing for the pi driver.
  *
- * `pi --version` answers installed/version; a short-lived `pi --mode rpc
- * --no-session` process answers the model catalog (`get_available_models`),
+ * The pinned Pi runtime answers version; a short-lived RPC process answers
+ * the model catalog (`get_available_models`),
  * thinking levels (`get_available_thinking_levels`), and slash commands
  * (`get_commands` — extension commands, prompt templates, and skills, all
  * invokable with a `/` prefix). Pi resolves provider credentials itself, so
@@ -21,7 +21,8 @@ import * as Effect from "effect/Effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { buildServerProvider, type ServerProviderDraft } from "../providerSnapshot.ts";
-import { type PiRpcRecord, spawnPiRpc } from "../piRpc.ts";
+import { PiRpcError, type PiRpcRecord, spawnPiRpc } from "../piRpc.ts";
+import { piRpcCapabilityIssue, resolvePiRuntimeCommand } from "../piRuntime.ts";
 
 const PI_PRESENTATION = {
   displayName: "Pi",
@@ -29,10 +30,6 @@ const PI_PRESENTATION = {
 } as const;
 
 const checkedAtNow = Effect.map(DateTime.now, DateTime.formatIso);
-
-export function piBinaryPath(piSettings: PiSettings): string {
-  return piSettings.binaryPath.trim().length > 0 ? piSettings.binaryPath : "pi";
-}
 
 export const makePendingPiProvider = (piSettings: PiSettings): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
@@ -54,7 +51,9 @@ export const makePendingPiProvider = (piSettings: PiSettings): Effect.Effect<Ser
     });
   });
 
-function thinkingLevelChoices(record: PiRpcRecord | undefined): ReadonlyArray<ProviderOptionChoice> {
+function thinkingLevelChoices(
+  record: PiRpcRecord | undefined,
+): ReadonlyArray<ProviderOptionChoice> {
   const levels = record?.data as Record<string, unknown> | undefined;
   const values = Array.isArray(levels?.levels) ? levels.levels : [];
   return values
@@ -158,13 +157,22 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   }
 
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const binaryPath = piBinaryPath(piSettings);
+  const cliRuntime = resolvePiRuntimeCommand({
+    piSettings,
+    entry: "cli",
+    ...(environment ? { environment } : {}),
+  });
+  const rpcRuntime = resolvePiRuntimeCommand({
+    piSettings,
+    entry: "rpc",
+    ...(environment ? { environment } : {}),
+  });
 
   const version = yield* spawner
     .string(
-      ChildProcess.make(binaryPath, ["--version"], {
+      ChildProcess.make(cliRuntime.binaryPath, [...cliRuntime.argsPrefix, "--version"], {
         cwd,
-        ...(environment ? { env: environment } : { extendEnv: true }),
+        ...(cliRuntime.environment ? { env: cliRuntime.environment } : { extendEnv: true }),
       }),
     )
     .pipe(
@@ -183,7 +191,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: `pi binary not found (looked for '${binaryPath}'). Install it with: npm install -g @earendil-works/pi-coding-agent`,
+        message: `Pi runtime failed to start (${cliRuntime.binaryPath}).`,
       },
     });
   }
@@ -193,11 +201,19 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   const catalog = yield* Effect.scoped(
     Effect.gen(function* () {
       const rpc = yield* spawnPiRpc({
-        binaryPath,
-        args: ["--mode", "rpc", "--no-session"],
+        binaryPath: rpcRuntime.binaryPath,
+        args: [...rpcRuntime.argsPrefix, "--no-session"],
         cwd,
-        ...(environment ? { environment } : {}),
+        ...(rpcRuntime.environment ? { environment: rpcRuntime.environment } : {}),
       });
+      const capabilities = yield* rpc.request({ type: "get_capabilities" });
+      const capabilityIssue = piRpcCapabilityIssue(capabilities);
+      if (capabilityIssue !== undefined) {
+        return yield* new PiRpcError({
+          operation: "get_capabilities",
+          detail: `Incompatible pi RPC runtime: ${capabilityIssue}.`,
+        });
+      }
       const models = yield* rpc.request({ type: "get_available_models" });
       const state = yield* rpc.request({ type: "get_state" }).pipe(Effect.option);
       const thinkingLevels = yield* rpc
