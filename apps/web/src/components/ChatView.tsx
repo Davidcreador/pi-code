@@ -226,7 +226,11 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PiManagementCommandDialog } from "./PiManagementCommandDialog";
 import { PiNativeCommandDialog } from "./PiNativeCommandDialog";
-import { isPiManagementCommand, type NativeSlashCommand } from "../nativeSlashCommands";
+import {
+  isPiManagementCommand,
+  resolveNativeSlashCommandDispatch,
+  type NativeSlashCommand,
+} from "../nativeSlashCommands";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { ChatHeader } from "./chat/ChatHeader";
@@ -4503,9 +4507,14 @@ function ChatViewContent(props: ChatViewProps) {
         void navigate({ to: "/settings/keybindings" });
         return;
       }
-      setNativeSlashCommand(command);
+      const dispatch = resolveNativeSlashCommandDispatch(command, isLocalDraftThread);
+      if (dispatch.type === "notice") {
+        toastManager.add({ type: "info", title: dispatch.message });
+        return;
+      }
+      setNativeSlashCommand(dispatch.command);
     },
-    [handleInteractionModeChange, navigate],
+    [handleInteractionModeChange, isLocalDraftThread, navigate],
   );
 
   const closeNativeSlashCommand = useCallback(() => setNativeSlashCommand(null), []);

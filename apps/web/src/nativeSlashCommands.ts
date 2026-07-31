@@ -59,3 +59,14 @@ export function isNativeSlashCommand(command: string): command is NativeSlashCom
 export function isPiManagementCommand(command: NativeSlashCommand): command is PiManagementCommand {
   return managementCommandNames.has(command);
 }
+
+export function resolveNativeSlashCommandDispatch(
+  command: NativeSlashCommand,
+  isLocalDraftThread: boolean,
+):
+  | { readonly type: "notice"; readonly message: string }
+  | { readonly type: "dialog"; readonly command: NativeSlashCommand } {
+  return command === "tree" && isLocalDraftThread
+    ? { type: "notice", message: "No entries in session" }
+    : { type: "dialog", command };
+}

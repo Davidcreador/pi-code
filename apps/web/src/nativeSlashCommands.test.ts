@@ -4,6 +4,7 @@ import {
   NATIVE_SLASH_COMMANDS,
   isNativeSlashCommand,
   parseNativeSlashCommand,
+  resolveNativeSlashCommandDispatch,
 } from "./nativeSlashCommands";
 
 describe("native slash commands", () => {
@@ -57,5 +58,24 @@ describe("native slash commands", () => {
   it("gives native names collision precedence", () => {
     expect(isNativeSlashCommand("tree")).toBe(true);
     expect(isNativeSlashCommand("extension-command")).toBe(false);
+  });
+
+  it("matches Pi's empty-session response for /tree on a local draft", () => {
+    expect(resolveNativeSlashCommandDispatch("tree", true)).toEqual({
+      type: "notice",
+      message: "No entries in session",
+    });
+    expect(resolveNativeSlashCommandDispatch("tree", false)).toEqual({
+      type: "dialog",
+      command: "tree",
+    });
+    for (const { command } of NATIVE_SLASH_COMMANDS) {
+      if (command !== "tree") {
+        expect(resolveNativeSlashCommandDispatch(command, true)).toEqual({
+          type: "dialog",
+          command,
+        });
+      }
+    }
   });
 });
