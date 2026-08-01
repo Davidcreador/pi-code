@@ -197,7 +197,7 @@ function activeBranch(entries: ReadonlyArray<unknown>, leafId: string): Readonly
     branch.push(entry);
     cursor = typeof entry.parentId === "string" ? entry.parentId : undefined;
   }
-  return branch.reverse();
+  return branch.toReversed();
 }
 
 function retainsMessage(entry: JsonRecord): boolean {

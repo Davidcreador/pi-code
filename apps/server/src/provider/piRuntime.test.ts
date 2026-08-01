@@ -1,9 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import * as path from "node:path";
-import { createInterface } from "node:readline";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeReadline from "node:readline";
 
 import { describe, expect, it } from "vite-plus/test";
 
@@ -69,14 +69,14 @@ describe("piRuntime", () => {
   });
 
   it("assigns a fresh session id to every imported JSONL", async () => {
-    const agentDir = mkdtempSync(path.join(tmpdir(), "d4-pi-import-test-"));
-    const cwd = mkdtempSync(path.join(tmpdir(), "d4-pi-import-cwd-"));
-    const child = spawn(
-      path.resolve(import.meta.dirname, "../../node_modules/.bin/pi"),
+    const agentDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "d4-pi-import-test-"));
+    const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "d4-pi-import-cwd-"));
+    const child = NodeChildProcess.spawn(
+      NodePath.resolve(import.meta.dirname, "../../node_modules/.bin/pi"),
       ["--mode", "rpc", "--session-id", "import-test"],
       { cwd, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, stdio: "pipe" },
     );
-    const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+    const lines = NodeReadline.createInterface({ input: child.stdout })[Symbol.asyncIterator]();
     const request = async (id: string, filename: string, content: string) => {
       child.stdin.write(`${JSON.stringify({ id, type: "import_session", filename, content })}\n`);
       while (true) {
@@ -129,8 +129,8 @@ describe("piRuntime", () => {
         child.kill();
         await exited;
       }
-      rmSync(agentDir, { recursive: true, force: true });
-      rmSync(cwd, { recursive: true, force: true });
+      NodeFS.rmSync(agentDir, { recursive: true, force: true });
+      NodeFS.rmSync(cwd, { recursive: true, force: true });
     }
   }, 30_000);
 

@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off
-import { rm, rmSync } from "node:fs";
+import * as NodeFS from "node:fs";
 
 import type { AssetResource } from "@t3tools/contracts";
 import {
@@ -64,7 +64,7 @@ const exportArtifactLock = Semaphore.makeUnsafe(1);
 
 function removeExportArtifact(handle: string, artifact: ExportArtifact): void {
   if (exportArtifacts.get(handle) !== artifact) return;
-  rm(artifact.directory, { recursive: true, force: true }, (error) => {
+  NodeFS.rm(artifact.directory, { recursive: true, force: true }, (error) => {
     if (error === null && exportArtifacts.get(handle) === artifact) {
       exportArtifacts.delete(handle);
     }
@@ -72,7 +72,7 @@ function removeExportArtifact(handle: string, artifact: ExportArtifact): void {
 }
 
 function retryPendingExportCleanup(directory: string): void {
-  rm(directory, { recursive: true, force: true }, (error) => {
+  NodeFS.rm(directory, { recursive: true, force: true }, (error) => {
     if (error === null) pendingExportCleanup.delete(directory);
   });
 }
@@ -88,10 +88,10 @@ exportCleanupTimer.unref();
 
 process.once("exit", () => {
   for (const artifact of exportArtifacts.values()) {
-    rmSync(artifact.directory, { recursive: true, force: true });
+    NodeFS.rmSync(artifact.directory, { recursive: true, force: true });
   }
   for (const directory of pendingExportCleanup) {
-    rmSync(directory, { recursive: true, force: true });
+    NodeFS.rmSync(directory, { recursive: true, force: true });
   }
 });
 

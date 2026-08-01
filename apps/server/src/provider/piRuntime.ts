@@ -1,4 +1,4 @@
-import { fileURLToPath } from "node:url";
+import * as NodeURL from "node:url";
 
 import type { PiSettings } from "@t3tools/contracts";
 
@@ -42,7 +42,7 @@ export function resolvePiRuntimeCommand(input: {
     };
   }
 
-  const entryPath = fileURLToPath(
+  const entryPath = NodeURL.fileURLToPath(
     new URL(input.entry === "rpc" ? "rpc-entry.js" : "cli.js", piPackageEntryUrl),
   );
   const isElectron = input.isElectron ?? process.versions.electron !== undefined;

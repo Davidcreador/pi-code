@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { spawn as spawnProcess } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 
 /**
@@ -160,7 +160,7 @@ function runGitHubCli(input: {
   readonly cwd: string;
 }): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const child = spawnProcess("gh", [...input.args], {
+    const child = NodeChildProcess.spawn("gh", [...input.args], {
       cwd: input.cwd,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
@@ -274,7 +274,7 @@ export function parsePiSessionTree(raw: unknown): PiNativeSessionTree {
   const childIds: string[][] = [];
   const stack = raw.tree
     .map((rawNode) => ({ rawNode, parentIndex: null as number | null }))
-    .reverse();
+    .toReversed();
 
   while (stack.length > 0) {
     const node = stack.pop();
@@ -616,7 +616,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             raw: record,
           })),
           type: "turn.started",
-          payload: { ...(context.model ? { model: context.model } : {}) },
+          payload: context.model ? { model: context.model } : {},
         });
       });
 
@@ -1223,7 +1223,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             yield* emit({
               ...(yield* buildEventBase({ threadId: input.threadId })),
               type: "session.started",
-              payload: { ...(resume ? { resume: input.resumeCursor } : {}) },
+              payload: resume ? { resume: input.resumeCursor } : {},
             });
             yield* emit({
               ...(yield* buildEventBase({ threadId: input.threadId })),

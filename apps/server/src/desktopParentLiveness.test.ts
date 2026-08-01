@@ -4,14 +4,24 @@ import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { once } from "node:events";
 
 import { expect, it } from "vite-plus/test";
 
 async function reservePort(): Promise<number> {
   const server = NodeNet.createServer();
   server.listen(0, "127.0.0.1");
-  await once(server, "listening");
+  await new Promise<void>((resolve, reject) => {
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    server.once("listening", onListening);
+    server.once("error", onError);
+  });
   const address = server.address();
   if (address === null || typeof address === "string") {
     server.close();
@@ -42,12 +52,30 @@ function spawnDesktopServer(baseDir: string) {
   });
 }
 
+function waitForExit(
+  child: NodeChildProcess.ChildProcess,
+): Promise<[number | null, NodeJS.Signals | null]> {
+  return new Promise((resolve, reject) => {
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      child.off("error", onError);
+      resolve([code, signal]);
+    };
+    const onError = (error: Error) => {
+      child.off("exit", onExit);
+      reject(error);
+    };
+    child.once("exit", onExit);
+    child.once("error", onError);
+  });
+}
+
 async function waitForReady(
   port: number,
   child: NodeChildProcess.ChildProcess,
   getStderr: () => string,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 20_000; attempt += 1) {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
     if (child.exitCode !== null) {
       throw new Error(`Server exited before readiness with code ${child.exitCode}: ${getStderr()}`);
     }
@@ -55,10 +83,15 @@ async function waitForReady(
       signal: AbortSignal.timeout(200),
     }).catch(() => null);
     if (response?.ok) return;
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("Timed out waiting for the desktop server.");
 }
+
+it("reports child process startup failures", async () => {
+  const child = NodeChildProcess.spawn("/definitely/not/a/picode-executable");
+  await expect(waitForExit(child)).rejects.toMatchObject({ code: "ENOENT" });
+});
 
 it("exits when its desktop parent liveness stdin closes", async () => {
   const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "picode-parent-liveness-"));
@@ -106,7 +139,7 @@ it("observes EOF delivered with the bootstrap envelope", async () => {
   const child = spawnDesktopServer(baseDir);
 
   try {
-    const exit = once(child, "exit") as Promise<[number | null, NodeJS.Signals | null]>;
+    const exit = waitForExit(child);
     child.stdin?.end(
       `${JSON.stringify({
         mode: "desktop",
@@ -133,7 +166,7 @@ it("fails closed when the liveness pipe closes before bootstrap", async () => {
   const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "picode-parent-liveness-"));
   const child = spawnDesktopServer(baseDir);
   try {
-    const exit = once(child, "exit") as Promise<[number | null, NodeJS.Signals | null]>;
+    const exit = waitForExit(child);
     child.stdin?.end();
     const [exitCode] = await exit;
 
