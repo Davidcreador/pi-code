@@ -51,6 +51,35 @@ describe("DesktopIpc", () => {
     }),
   );
 
+  it.effect("contains sync handler failures inside the listener", () =>
+    Effect.gen(function* () {
+      const cause = new Error("sync handler failed");
+      let listener: DesktopIpc.DesktopIpcSyncListener | undefined;
+      const ipcMain = makeIpcMain({
+        on: (_channel, registered) => {
+          listener = registered;
+        },
+      });
+      const ipc = DesktopIpc.make(ipcMain);
+      const failingMethod: DesktopIpc.DesktopSyncIpcMethod<never, never> = {
+        channel: syncMethod.channel,
+        handler: () => Effect.die(cause),
+      };
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ipc.handleSync(failingMethod);
+          const event: DesktopIpc.DesktopIpcSyncEvent = { returnValue: "unset" };
+          assert.doesNotThrow(() => listener?.(event));
+          assert.deepEqual(event.returnValue, {
+            _tag: "DesktopIpcSyncHandlerError",
+            channel: syncMethod.channel,
+          });
+        }),
+      );
+    }),
+  );
+
   it.effect("preserves sync unregistration context and cause in the finalizer defect", () =>
     Effect.gen(function* () {
       const cause = new Error("sync unregistration failed");

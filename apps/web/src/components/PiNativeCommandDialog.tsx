@@ -101,7 +101,6 @@ export function PiNativeCommandDialog(props: {
     const failure = failureMessage(result, "Could not read Pi session state.");
     if (failure) throw new Error(failure);
     if (result._tag === "Success") {
-      setSession(result.value);
       return result.value;
     }
     throw new Error("Could not read Pi session state.");
@@ -109,6 +108,7 @@ export function PiNativeCommandDialog(props: {
 
   const requireIdle = useCallback(async () => {
     const current = await loadState();
+    setSession(current);
     if (current.state.isStreaming || current.state.isCompacting) {
       throw new Error(
         current.state.isCompacting
@@ -119,6 +119,10 @@ export function PiNativeCommandDialog(props: {
   }, [loadState]);
 
   useEffect(() => {
+    let cancelled = false;
+    const cancel = () => {
+      cancelled = true;
+    };
     setError(null);
     setNotice(null);
     setTree(null);
@@ -129,29 +133,31 @@ export function PiNativeCommandDialog(props: {
     setSummarize(false);
     setName("");
     setLabel("");
-    if (!props.command) return;
+    if (!props.command) return cancel;
     if (props.command === "new") {
       props.onNewThread();
       props.onClose();
-      return;
+      return cancel;
     }
     if (props.command === "copy") {
       void getLastAssistantText(input)
         .then(async (result) => {
+          if (cancelled) return;
           const failure = failureMessage(result, "Could not read the last assistant response.");
           if (failure) return setError(failure);
           if (result._tag === "Success" && result.value.text) {
             await writePiNativeClipboard(result.value.text);
-            setNotice("Last assistant response copied.");
+            if (!cancelled) setNotice("Last assistant response copied.");
           } else setNotice("There is no assistant response to copy.");
         })
-        .catch((cause: unknown) =>
-          setError(cause instanceof Error ? cause.message : "Copy failed."),
-        );
-      return;
+        .catch((cause: unknown) => {
+          if (!cancelled) setError(cause instanceof Error ? cause.message : "Copy failed.");
+        });
+      return cancel;
     }
     if (props.command === "tree") {
       void getTree(input).then((result) => {
+        if (cancelled) return;
         const failure = failureMessage(result, "Could not load the session tree.");
         if (failure) return setError(failure);
         if (result._tag === "Success") {
@@ -162,20 +168,31 @@ export function PiNativeCommandDialog(props: {
           );
         }
       });
-      void loadState().catch((cause: unknown) =>
-        setError(cause instanceof Error ? cause.message : "Could not load session state."),
-      );
-      return;
+      void loadState()
+        .then((current) => {
+          if (!cancelled) setSession(current);
+        })
+        .catch((cause: unknown) => {
+          if (!cancelled) {
+            setError(cause instanceof Error ? cause.message : "Could not load session state.");
+          }
+        });
+      return cancel;
     }
     if (props.command === "session" || props.command === "stats" || props.command === "name") {
       void loadState()
         .then((current) => {
+          if (cancelled) return;
+          setSession(current);
           if (props.command === "name") setName(current.state.sessionName ?? "");
         })
-        .catch((cause: unknown) =>
-          setError(cause instanceof Error ? cause.message : "Could not load session state."),
-        );
+        .catch((cause: unknown) => {
+          if (!cancelled) {
+            setError(cause instanceof Error ? cause.message : "Could not load session state.");
+          }
+        });
     }
+    return cancel;
   }, [
     getLastAssistantText,
     getTree,
@@ -392,7 +409,7 @@ export function PiNativeCommandDialog(props: {
             <p>Export this session as a server-generated HTML file?</p>
           ) : null}
           {props.command === "quit" ? (
-            <p>{window.desktopBridge?.quitApp ? "Quit d4?" : "Stop the current session?"}</p>
+            <p>{window.desktopBridge?.quitApp ? "Quit piCode?" : "Stop the current session?"}</p>
           ) : null}
         </DialogPanel>
         <DialogFooter>
@@ -548,7 +565,7 @@ export function PiNativeCommandDialog(props: {
                 })
               }
             >
-              {window.desktopBridge?.quitApp ? "Quit d4" : "Stop session"}
+              {window.desktopBridge?.quitApp ? "Quit piCode" : "Stop session"}
             </Button>
           ) : null}
         </DialogFooter>

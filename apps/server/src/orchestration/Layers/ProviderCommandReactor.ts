@@ -21,6 +21,7 @@ import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
@@ -29,6 +30,10 @@ import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
+import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
+import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
@@ -88,6 +93,9 @@ const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
+const THREAD_MODEL_SELECTION_MAX = 10_000;
+const THREAD_MODEL_SELECTION_TTL = Duration.minutes(30);
+export const PROVIDER_COMMAND_REACTOR_CURSOR_KEY = "reactor.provider-command";
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
 
@@ -193,6 +201,8 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const projectionStateRepository = yield* ProjectionStateRepository;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
@@ -215,7 +225,13 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const threadModelSelections = new Map<string, ModelSelection>();
+  const threadModelSelections = yield* Cache.make<string, ModelSelection>({
+    capacity: THREAD_MODEL_SELECTION_MAX,
+    timeToLive: THREAD_MODEL_SELECTION_TTL,
+    lookup: () => Effect.die("thread model selection cache does not load missing entries"),
+  });
+  const getThreadModelSelection = (threadId: ThreadId) =>
+    Cache.getOption(threadModelSelections, threadId).pipe(Effect.map(Option.getOrUndefined));
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -553,7 +569,7 @@ const make = Effect.gen(function* () {
         requestedModelSelection !== undefined &&
         activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
       const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
-      const previousModelSelection = threadModelSelections.get(threadId);
+      const previousModelSelection = yield* getThreadModelSelection(threadId);
       const shouldRestartForModelSelectionChange =
         preferredProvider === "claudeAgent" &&
         requestedModelSelection !== undefined &&
@@ -630,7 +646,7 @@ const make = Effect.gen(function* () {
       pendingTurnStart: true,
     });
     if (input.modelSelection !== undefined) {
-      threadModelSelections.set(input.threadId, input.modelSelection);
+      yield* Cache.set(threadModelSelections, input.threadId, input.modelSelection);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
     const normalizedAttachments = input.attachments ?? [];
@@ -651,7 +667,9 @@ const make = Effect.gen(function* () {
           : (yield* providerService.getCapabilities(activeSession.providerInstanceId))
               .sessionModelSwitch;
     const requestedModelSelection =
-      input.modelSelection ?? threadModelSelections.get(input.threadId) ?? thread.modelSelection;
+      input.modelSelection ??
+      (yield* getThreadModelSelection(input.threadId)) ??
+      thread.modelSelection;
     const modelForTurn =
       sessionModelSwitch === "unsupported" && input.modelSelection === undefined
         ? activeSession?.model !== undefined
@@ -866,7 +884,7 @@ const make = Effect.gen(function* () {
             threadId: event.payload.threadId,
             cause: Cause.pretty(recoveryCause),
             originalCause: Cause.pretty(cause),
-          }),
+          }).pipe(Effect.andThen(Effect.failCause(recoveryCause))),
         ),
       );
 
@@ -888,9 +906,11 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    // The provider call and SQLite cursor update cannot be atomic. A crash after
+    // provider success and before the cursor write can replay this request.
     yield* providerService
       .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.asVoid);
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
@@ -913,7 +933,18 @@ const make = Effect.gen(function* () {
     }
 
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    yield* providerService.interruptTurn({ threadId: event.payload.threadId }).pipe(
+      Effect.catchCause((cause) =>
+        appendProviderFailureActivity({
+          threadId: event.payload.threadId,
+          kind: "provider.turn.interrupt.failed",
+          summary: "Provider turn interrupt failed",
+          detail: Cause.pretty(cause),
+          turnId: event.payload.turnId ?? null,
+          createdAt: event.payload.createdAt,
+        }),
+      ),
+    );
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
@@ -1052,7 +1083,7 @@ const make = Effect.gen(function* () {
         if (!thread?.session || thread.session.status === "stopped") {
           return;
         }
-        const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
+        const cachedModelSelection = yield* getThreadModelSelection(event.payload.threadId);
         yield* ensureSessionForThread(
           event.payload.threadId,
           event.occurredAt,
@@ -1091,24 +1122,123 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  type WorkItem = {
+    readonly event: OrchestrationEvent;
+    readonly source: "replay" | "live";
+  };
+
+  let lastHandledSequence = 0;
+
+  const isProviderIntentEvent = (event: OrchestrationEvent): event is ProviderIntentEvent =>
+    event.type === "thread.runtime-mode-set" ||
+    event.type === "thread.turn-start-requested" ||
+    event.type === "thread.turn-interrupt-requested" ||
+    event.type === "thread.approval-response-requested" ||
+    event.type === "thread.user-input-response-requested" ||
+    event.type === "thread.session-stop-requested";
+
+  const advanceCursor = (event: OrchestrationEvent) =>
+    event.sequence <= lastHandledSequence
+      ? Effect.void
+      : projectionStateRepository
+          .upsert({
+            projector: PROVIDER_COMMAND_REACTOR_CURSOR_KEY,
+            lastAppliedSequence: event.sequence,
+            updatedAt: event.occurredAt,
+          })
+          .pipe(
+            Effect.orDie,
+            Effect.tap(() =>
+              Effect.sync(() => {
+                lastHandledSequence = event.sequence;
+              }),
+            ),
+          );
+
+  const processTurnStartTerminally = <E, R>(
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+    effect: Effect.Effect<void, E, R>,
+  ) =>
+    effect.pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) {
+          return Effect.failCause(cause);
+        }
+        return Effect.logError("provider command reactor blocked after nonterminal turn start", {
+          eventType: event.type,
+          threadId: event.payload.threadId,
+          sequence: event.sequence,
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.andThen(Effect.never));
+      }),
+    );
+
+  const processWorkItem = Effect.fn("processWorkItem")(function* (item: WorkItem) {
+    const { event } = item;
+    if (event.type === "thread.turn-start-requested") {
+      if (item.source === "replay") {
+        yield* processTurnStartTerminally(
+          event,
+          projectionTurnRepository
+            .getPendingTurnStartByThreadId({ threadId: event.payload.threadId })
+            .pipe(
+              Effect.orDie,
+              Effect.flatMap((pendingStart) =>
+                Option.isSome(pendingStart) &&
+                pendingStart.value.messageId === event.payload.messageId
+                  ? processDomainEvent(event)
+                  : Effect.void,
+              ),
+            ),
+        );
+      } else {
+        yield* processTurnStartTerminally(event, processDomainEvent(event));
+      }
+    } else if (item.source === "live" && isProviderIntentEvent(event)) {
+      yield* processDomainEventSafely(event);
+    }
+    yield* advanceCursor(event);
+  });
+
+  const worker = yield* makeDrainableWorker(processWorkItem);
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
-    const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
-      if (
-        event.type === "thread.runtime-mode-set" ||
-        event.type === "thread.turn-start-requested" ||
-        event.type === "thread.turn-interrupt-requested" ||
-        event.type === "thread.approval-response-requested" ||
-        event.type === "thread.user-input-response-requested" ||
-        event.type === "thread.session-stop-requested"
-      ) {
-        return yield* worker.enqueue(event);
-      }
+    const cursorState = yield* projectionStateRepository
+      .getByProjector({ projector: PROVIDER_COMMAND_REACTOR_CURSOR_KEY })
+      .pipe(Effect.orDie);
+    const cursor = Option.match(cursorState, {
+      onNone: () => 0,
+      onSome: (state) => state.lastAppliedSequence,
     });
+    lastHandledSequence = cursor;
+    let lastQueuedSequence = cursor;
 
-    yield* Effect.forkScoped(
-      Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent),
+    // Start the hot subscription synchronously so acquisition completes before
+    // replay can publish or observe any overlapping persisted events.
+    const liveEvents = yield* Effect.acquireRelease(
+      Queue.unbounded<OrchestrationEvent, Cause.Done>(),
+      Queue.shutdown,
+    );
+    yield* Stream.runIntoQueue(orchestrationEngine.streamDomainEvents, liveEvents).pipe(
+      Effect.forkScoped({ startImmediately: true }),
+    );
+
+    const enqueueInSequence = (source: WorkItem["source"]) => (event: OrchestrationEvent) =>
+      Effect.suspend(() => {
+        if (event.sequence <= lastQueuedSequence) {
+          return Effect.void;
+        }
+        lastQueuedSequence = event.sequence;
+        return worker.enqueue({ event, source });
+      });
+
+    yield* orchestrationEngine
+      .readEvents(cursor, Number.MAX_SAFE_INTEGER)
+      .pipe(Stream.runForEach(enqueueInSequence("replay")), Effect.orDie);
+
+    yield* Stream.fromQueue(liveEvents).pipe(
+      Stream.runForEach(enqueueInSequence("live")),
+      Effect.forkScoped,
     );
   });
 
@@ -1118,4 +1248,7 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
+  Layer.provideMerge(ProjectionStateRepositoryLive),
+  Layer.provideMerge(ProjectionTurnRepositoryLive),
+);

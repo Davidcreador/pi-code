@@ -38,7 +38,8 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
   if (!provider.enabled) {
     return {
       headline: "Disabled",
-      detail: provider.message ?? "This provider is installed but disabled for new sessions in d4.",
+      detail:
+        provider.message ?? "This provider is installed but disabled for new sessions in piCode.",
     };
   }
   if (!provider.installed) {

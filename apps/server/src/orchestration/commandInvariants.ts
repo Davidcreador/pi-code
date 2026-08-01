@@ -113,6 +113,34 @@ export function requireThread(input: {
   );
 }
 
+export function requireActiveThread(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly threadId: ThreadId;
+}): Effect.Effect<OrchestrationThread, OrchestrationCommandInvariantError> {
+  return requireThread(input).pipe(
+    Effect.flatMap((thread) => {
+      if (thread.deletedAt !== null) {
+        return Effect.fail(
+          invariantError(
+            input.command.type,
+            `Thread '${input.threadId}' is deleted and cannot handle command '${input.command.type}'.`,
+          ),
+        );
+      }
+      if (thread.archivedAt !== null) {
+        return Effect.fail(
+          invariantError(
+            input.command.type,
+            `Thread '${input.threadId}' is archived and cannot handle command '${input.command.type}'.`,
+          ),
+        );
+      }
+      return Effect.succeed(thread);
+    }),
+  );
+}
+
 export function requireThreadArchived(input: {
   readonly readModel: OrchestrationReadModel;
   readonly command: OrchestrationCommand;

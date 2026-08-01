@@ -127,8 +127,8 @@ function defaultBindingForBinding(
   );
 }
 
-function keybindingRowId(command: KeybindingCommand, key: string, when: string): string {
-  return `${command}\u0000${key}\u0000${when}`;
+function keybindingRowId(command: KeybindingCommand, occurrence: number): string {
+  return `${command}\u0000${occurrence}`;
 }
 
 function conflictsWithWhen(leftWhen: string, rightWhen: string): boolean {
@@ -158,12 +158,15 @@ export function buildKeybindingRows(
   query: string,
 ): ReadonlyArray<KeybindingRow> {
   const normalizedQuery = query.trim().toLowerCase();
-  const rows = keybindings.map((binding, index) => {
+  const commandOccurrences = new Map<KeybindingCommand, number>();
+  const rows = keybindings.map((binding) => {
     const defaultBinding = defaultBindingForBinding(binding);
     const key = shortcutToKeybindingInput(binding.shortcut);
     const when = whenAstToExpression(binding.whenAst);
+    const occurrence = commandOccurrences.get(binding.command) ?? 0;
+    commandOccurrences.set(binding.command, occurrence + 1);
     return {
-      id: `${keybindingRowId(binding.command, key, when)}\u0000${index}`,
+      id: keybindingRowId(binding.command, occurrence),
       command: binding.command,
       key,
       when,

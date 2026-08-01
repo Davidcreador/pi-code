@@ -11,7 +11,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as Scope from "effect/Scope";
 import { describe, expect } from "vite-plus/test";
 
-import { checkpointRefForThreadTurn } from "./Utils.ts";
+import { checkpointRefForThreadTurn, checkpointRefPrefixForThread } from "./Utils.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -103,13 +103,48 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
       }),
     );
 
-    it.effect("returns true when a Git repository is detected", () =>
+    it.effect("returns true from a nested Git worktree directory", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nested = NodePath.join(tmp, "src", "nested");
+        yield* fileSystem.makeDirectory(nested, { recursive: true });
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+
+        expect(yield* checkpointStore.isGitRepository(nested)).toBe(true);
+      }),
+    );
+  });
+
+  describe("deleteCheckpointRefs", () => {
+    it.effect("deletes every checkpoint ref under a thread prefix", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();
         yield* initRepoWithCommit(tmp);
         const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const deletedThreadId = ThreadId.make("thread-delete-checkpoints");
+        const retainedThreadId = ThreadId.make("thread-keep-checkpoints");
+        const deletedRefs = [
+          checkpointRefForThreadTurn(deletedThreadId, 0),
+          checkpointRefForThreadTurn(deletedThreadId, 1),
+        ];
+        const retainedRef = checkpointRefForThreadTurn(retainedThreadId, 0);
 
-        expect(yield* checkpointStore.isGitRepository(tmp)).toBe(true);
+        for (const checkpointRef of [...deletedRefs, retainedRef]) {
+          yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+        }
+        yield* checkpointStore.deleteCheckpointRefs({
+          cwd: tmp,
+          checkpointRefPrefix: checkpointRefPrefixForThread(deletedThreadId),
+        });
+
+        for (const checkpointRef of deletedRefs) {
+          expect(yield* checkpointStore.hasCheckpointRef({ cwd: tmp, checkpointRef })).toBe(false);
+        }
+        expect(
+          yield* checkpointStore.hasCheckpointRef({ cwd: tmp, checkpointRef: retainedRef }),
+        ).toBe(true);
       }),
     );
   });

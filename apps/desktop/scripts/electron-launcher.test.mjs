@@ -1,12 +1,19 @@
 import { assert, describe, it } from "vite-plus/test";
 
 import {
+  APP_BUNDLE_ID,
+  APP_DISPLAY_NAME,
   makeDevelopmentLauncherScript,
   resolveElectronBinaryPath,
   resolveMacLauncherPaths,
 } from "./electron-launcher.mjs";
 
 describe("electron development launcher", () => {
+  it("uses piCode branding without changing the bundle identifier", () => {
+    assert.equal(APP_DISPLAY_NAME, "piCode");
+    assert.equal(APP_BUNDLE_ID, "com.d4.desktop");
+  });
+
   it("uses captured values only as fallbacks for a live runner environment", () => {
     const script = makeDevelopmentLauncherScript({
       electronBinaryPath: "/repo/node_modules/electron/Electron",
@@ -52,18 +59,18 @@ describe("electron development launcher", () => {
 
   it("keeps the native Electron executable name inside the branded macOS bundle", () => {
     const paths = resolveMacLauncherPaths(
-      "/repo/apps/desktop/.electron-runtime/d4 (Dev).app",
-      "d4 (Dev)",
+      "/repo/apps/desktop/.electron-runtime/piCode (Dev).app",
+      "piCode (Dev)",
     );
 
-    assert.equal(paths.launcherExecutableName, "d4 (Dev) Launcher");
+    assert.equal(paths.launcherExecutableName, "piCode (Dev) Launcher");
     assert.equal(
       paths.launcherBinaryPath,
-      "/repo/apps/desktop/.electron-runtime/d4 (Dev).app/Contents/MacOS/d4 (Dev) Launcher",
+      "/repo/apps/desktop/.electron-runtime/piCode (Dev).app/Contents/MacOS/piCode (Dev) Launcher",
     );
     assert.equal(
       paths.runtimeElectronBinaryPath,
-      "/repo/apps/desktop/.electron-runtime/d4 (Dev).app/Contents/MacOS/Electron",
+      "/repo/apps/desktop/.electron-runtime/piCode (Dev).app/Contents/MacOS/Electron",
     );
 
     const script = makeDevelopmentLauncherScript({
@@ -74,7 +81,7 @@ describe("electron development launcher", () => {
     });
     assert.include(
       script,
-      "exec '/repo/apps/desktop/.electron-runtime/d4 (Dev).app/Contents/MacOS/Electron'",
+      "exec '/repo/apps/desktop/.electron-runtime/piCode (Dev).app/Contents/MacOS/Electron'",
     );
     assert.notInclude(script, "node_modules/electron");
   });

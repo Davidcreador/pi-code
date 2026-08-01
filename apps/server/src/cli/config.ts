@@ -13,7 +13,7 @@ import * as SchemaIssue from "effect/SchemaIssue";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { Argument, Flag } from "effect/unstable/cli";
 
-import { readBootstrapEnvelope } from "../bootstrap.ts";
+import { DesktopParentLivenessSetupError, readBootstrapEnvelope } from "../bootstrap.ts";
 import * as ServerConfig from "../config.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 
@@ -32,7 +32,7 @@ export const hostFlag = Flag.string("host").pipe(
 );
 export const baseDirFlag = Flag.string("base-dir").pipe(
   Flag.withDescription(
-    "Explicit d4 data directory; runtime state is stored under userdata (equivalent to D4_HOME).",
+    "Explicit piCode data directory; runtime state is stored under userdata (equivalent to D4_HOME).",
   ),
   Flag.optional,
 );
@@ -48,6 +48,10 @@ export const noBrowserFlag = Flag.boolean("no-browser").pipe(
 export const bootstrapFdFlag = Flag.integer("bootstrap-fd").pipe(
   Flag.withSchema(Schema.Int),
   Flag.withDescription("Read one-time bootstrap secrets from the given file descriptor."),
+  Flag.optional,
+);
+export const desktopParentLivenessFlag = Flag.boolean("desktop-parent-liveness").pipe(
+  Flag.withDescription("Exit when the desktop parent closes the bootstrap pipe."),
   Flag.optional,
 );
 export const autoBootstrapProjectFromCwdFlag = Flag.boolean("auto-bootstrap-project-from-cwd").pipe(
@@ -150,6 +154,7 @@ export interface CliServerFlags {
   readonly devUrl: Option.Option<URL>;
   readonly noBrowser: Option.Option<boolean>;
   readonly bootstrapFd: Option.Option<number>;
+  readonly desktopParentLiveness?: Option.Option<boolean>;
   readonly autoBootstrapProjectFromCwd: Option.Option<boolean>;
   readonly logWebSocketEvents: Option.Option<boolean>;
   readonly tailscaleServeEnabled: Option.Option<boolean>;
@@ -184,6 +189,7 @@ export const sharedServerCommandFlags = {
   devUrl: devUrlFlag,
   noBrowser: noBrowserFlag,
   bootstrapFd: bootstrapFdFlag,
+  desktopParentLiveness: desktopParentLivenessFlag,
   autoBootstrapProjectFromCwd: autoBootstrapProjectFromCwdFlag,
   logWebSocketEvents: logWebSocketEventsFlag,
   tailscaleServeEnabled: tailscaleServeFlag,
@@ -229,16 +235,34 @@ export const resolveServerConfig = (
       devUrl: flags.devUrl ?? Option.none(),
       noBrowser: flags.noBrowser ?? Option.none(),
       bootstrapFd: flags.bootstrapFd ?? Option.none(),
+      desktopParentLiveness: flags.desktopParentLiveness ?? Option.none(),
       autoBootstrapProjectFromCwd: flags.autoBootstrapProjectFromCwd ?? Option.none(),
       logWebSocketEvents: flags.logWebSocketEvents ?? Option.none(),
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
     } satisfies CliServerFlags;
     const bootstrapFd = Option.getOrUndefined(normalizedFlags.bootstrapFd) ?? env.bootstrapFd;
+    const desktopParentLiveness = Option.getOrElse(
+      normalizedFlags.desktopParentLiveness,
+      () => false,
+    );
+    if (desktopParentLiveness && bootstrapFd === undefined) {
+      return yield* new DesktopParentLivenessSetupError({
+        reason: "missing-bootstrap-fd",
+      });
+    }
     const bootstrapEnvelope =
       bootstrapFd !== undefined
-        ? yield* readBootstrapEnvelope(DesktopBackendBootstrap, bootstrapFd)
+        ? yield* readBootstrapEnvelope(DesktopBackendBootstrap, bootstrapFd, {
+            preserveFd: desktopParentLiveness,
+          })
         : Option.none();
+    if (desktopParentLiveness && Option.isNone(bootstrapEnvelope)) {
+      return yield* new DesktopParentLivenessSetupError({
+        reason: "missing-bootstrap-envelope",
+        fd: bootstrapFd,
+      });
+    }
     const bootstrap = Option.getOrUndefined(bootstrapEnvelope);
 
     const mode: ServerConfig.RuntimeMode = Option.getOrElse(
@@ -379,6 +403,8 @@ export const resolveServerConfig = (
       noBrowser,
       startupPresentation,
       desktopBootstrapToken,
+      desktopParentLivenessFd: desktopParentLiveness ? bootstrapFd : undefined,
+      desktopParentPid: bootstrap?.desktopParentPid,
       desktopTelemetryFd,
       desktopTelemetryControlFd,
       resourceMonitorPath,
@@ -405,6 +431,7 @@ export const resolveCliAuthConfig = (
       devUrl: flags.devUrl ?? Option.none(),
       noBrowser: Option.none(),
       bootstrapFd: Option.none(),
+      desktopParentLiveness: Option.none(),
       autoBootstrapProjectFromCwd: Option.none(),
       logWebSocketEvents: Option.none(),
       tailscaleServeEnabled: Option.none(),

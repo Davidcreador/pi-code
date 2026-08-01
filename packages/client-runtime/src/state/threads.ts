@@ -1,5 +1,6 @@
 import {
   ORCHESTRATION_WS_METHODS,
+  OrchestrationGetSnapshotError,
   type EnvironmentId as EnvironmentIdType,
   type OrchestrationThread,
   type OrchestrationThreadDetailSnapshot,
@@ -11,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Atom } from "effect/unstable/reactivity";
@@ -41,6 +43,17 @@ function formatThreadError(cause: Cause.Cause<unknown>): string {
   return error instanceof Error && error.message.trim().length > 0
     ? error.message
     : "Could not synchronize the thread.";
+}
+
+const isOrchestrationGetSnapshotError = Schema.is(OrchestrationGetSnapshotError);
+
+function isMissingThreadFailure(cause: Cause.Cause<unknown>, threadId: ThreadIdType): boolean {
+  return cause.reasons.some(
+    (reason) =>
+      reason._tag === "Fail" &&
+      isOrchestrationGetSnapshotError(reason.error) &&
+      reason.error.message === `Thread ${threadId} was not found`,
+  );
 }
 
 function shouldPersistThread(thread: OrchestrationThread): boolean {
@@ -80,6 +93,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     Option.match(cached, { onNone: () => 0, onSome: (snapshot) => snapshot.snapshotSequence }),
   );
   const awaitingCompletion = yield* Ref.make(false);
+  const unconfirmedResumeCursor = yield* Ref.make(false);
   const persistence = yield* Queue.sliding<OrchestrationThreadDetailSnapshot>(1);
 
   const persist = Effect.fn("EnvironmentThreadState.persist")(function* (
@@ -183,6 +197,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     item: OrchestrationThreadStreamItem,
   ) {
     if (item.kind === "synchronized") {
+      if (yield* Ref.getAndSet(unconfirmedResumeCursor, false)) {
+        yield* SubscriptionRef.set(lastSequence, 0);
+      }
       yield* Ref.set(awaitingCompletion, false);
       yield* SubscriptionRef.update(state, (current) =>
         Option.isSome(current.data) && current.status !== "deleted"
@@ -193,11 +210,13 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
 
     if (item.kind === "snapshot") {
+      yield* Ref.set(unconfirmedResumeCursor, false);
       yield* SubscriptionRef.set(lastSequence, item.snapshot.snapshotSequence);
       yield* setThread(item.snapshot.thread);
       return;
     }
 
+    yield* Ref.set(unconfirmedResumeCursor, false);
     const sequence = yield* SubscriptionRef.get(lastSequence);
     if (item.event.sequence <= sequence) {
       return;
@@ -236,7 +255,12 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const foregroundResubscriptions = Option.match(wakeups, {
     onNone: () => Stream.never,
     onSome: (service) =>
-      service.changes.pipe(Stream.filter((reason) => reason === "application-active")),
+      service.changes.pipe(
+        Stream.filter((reason) => reason === "application-active"),
+        Stream.filterEffect(() =>
+          SubscriptionRef.get(state).pipe(Effect.map((current) => current.status !== "deleted")),
+        ),
+      ),
   });
 
   yield* setSynchronizing;
@@ -275,7 +299,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         }
 
         const sequence = yield* SubscriptionRef.get(lastSequence);
-        const canResume = Option.isSome(current.data);
+        const canResume = Option.isSome(current.data) && sequence > 0;
+        yield* Ref.set(unconfirmedResumeCursor, supportsCompletionMarker && canResume);
         if (!supportsCompletionMarker && canResume) {
           yield* SubscriptionRef.update(state, (value) => ({
             ...value,
@@ -291,8 +316,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         };
       }),
       {
-        onExpectedFailure: setStreamError,
-        retryExpectedFailureAfter: "250 millis",
+        onExpectedFailure: (cause) =>
+          isMissingThreadFailure(cause, threadId) ? setDeleted() : setStreamError(cause),
+        shouldRetryExpectedFailure: (cause) => !isMissingThreadFailure(cause, threadId),
         resubscribe: foregroundResubscriptions,
       },
     ).pipe(Stream.runForEach(applyItem)),

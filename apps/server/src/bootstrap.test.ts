@@ -18,6 +18,7 @@ import {
   BootstrapFdStatError,
   BootstrapInputStreamOpenError,
   readBootstrapEnvelope,
+  waitForDesktopParentExit,
 } from "./bootstrap.ts";
 import { assertNone, assertSome } from "@effect/vitest/utils";
 
@@ -108,6 +109,30 @@ it.layer(NodeServices.layer)("readBootstrapEnvelope", (it) => {
       } finally {
         openSyncInterceptor.failPath = null;
       }
+    }),
+  );
+
+  it.effect("preserves a directly-read bootstrap fd for parent liveness", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const filePath = yield* fs.makeTempFileScoped({ prefix: "t3-bootstrap-", suffix: ".ndjson" });
+      yield* fs.writeFileString(
+        filePath,
+        `${yield* encodeTestEnvelopeSchema({ mode: "desktop" })}\n`,
+      );
+      const fd = yield* Effect.acquireRelease(
+        Effect.sync(() => NodeFS.openSync(filePath, "r")),
+        (fd) => Effect.sync(() => NodeFS.closeSync(fd)),
+      );
+
+      const payload = yield* readBootstrapEnvelope(TestEnvelopeSchema, fd, {
+        timeoutMs: 100,
+        preserveFd: true,
+      }).pipe(Effect.provideService(HostProcessPlatform, "win32"));
+
+      assertSome(payload, { mode: "desktop" });
+      yield* waitForDesktopParentExit(fd);
+      assert.doesNotThrow(() => NodeFS.fstatSync(fd));
     }),
   );
 
@@ -211,7 +236,7 @@ it.layer(NodeServices.layer)("readBootstrapEnvelope", (it) => {
 
       const _writer = yield* Effect.acquireRelease(
         Effect.sync(() =>
-          NodeChildProcess.spawn("sh", ["-c", 'exec 3>"$1"; sleep 60', "sh", fifoPath], {
+          NodeChildProcess.spawn("sh", ["-c", 'exec 3>"$1"; exec sleep 60', "sh", fifoPath], {
             stdio: ["ignore", "ignore", "ignore"],
           }),
         ),

@@ -2,9 +2,10 @@ import {
   CommandId,
   DEFAULT_MODEL,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  defaultInstanceIdForDriver,
   type ModelSelection,
   ProjectId,
-  ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
@@ -162,7 +163,7 @@ export const launchStartupHeartbeat = recordStartupHeartbeat.pipe(
 );
 
 export const getAutoBootstrapDefaultModelSelection = (): ModelSelection => ({
-  instanceId: ProviderInstanceId.make("codex"),
+  instanceId: defaultInstanceIdForDriver(ProviderDriverKind.make("pi")),
   model: DEFAULT_MODEL,
 });
 
@@ -458,7 +459,7 @@ export const make = Effect.gen(function* () {
         yield* Effect.logDebug("startup phase: browser open check");
         const startupBrowserTarget = yield* resolveStartupBrowserTarget;
         if (serverConfig.mode !== "desktop") {
-          yield* Effect.logInfo("Authentication required. Open d4 using the pairing URL.").pipe(
+          yield* Effect.logInfo("Authentication required. Open piCode using the pairing URL.").pipe(
             Effect.annotateLogs({ pairingUrl: startupBrowserTarget }),
           );
         }

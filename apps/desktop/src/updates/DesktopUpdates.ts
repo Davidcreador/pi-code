@@ -17,16 +17,20 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import * as DesktopWindow from "../window/DesktopWindow.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
 import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 import {
@@ -199,6 +203,15 @@ function getCanRetryFromState(state: DesktopUpdateState): boolean {
   return state.availableVersion !== null || state.downloadedVersion !== null;
 }
 
+function isFailedInstallState(state: DesktopUpdateState): boolean {
+  return (
+    state.status === "downloaded" &&
+    state.errorContext === "install" &&
+    typeof state.message === "string" &&
+    state.message.trim().length > 0
+  );
+}
+
 function shouldBroadcastDownloadProgress(
   currentState: DesktopUpdateState,
   nextPercent: number,
@@ -248,16 +261,22 @@ export const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const desktopState = yield* DesktopState.DesktopState;
+  const electronApp = yield* ElectronApp.ElectronApp;
+  const electronDialog = yield* ElectronDialog.ElectronDialog;
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
+  const desktopWindow = yield* DesktopWindow.DesktopWindow;
 
+  const stateTransitionSemaphore = yield* Semaphore.make(1);
+  const installFailureSemaphore = yield* Semaphore.make(1);
   const appUpdateYmlConfigRef = yield* Ref.make<Option.Option<AppUpdateYmlConfig>>(Option.none());
   const updateCheckInFlightRef = yield* Ref.make(false);
   const updateDownloadInFlightRef = yield* Ref.make(false);
   const updateInstallInFlightRef = yield* Ref.make(false);
+  const installFailureClaimedRef = yield* Ref.make(false);
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
@@ -268,20 +287,31 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  const emitState = Ref.get(updateStateRef).pipe(
-    Effect.flatMap((state) => electronWindow.sendAll(IpcChannels.UPDATE_STATE_CHANNEL, state)),
+  const broadcastState = (state: DesktopUpdateState): Effect.Effect<void> =>
+    electronWindow.sendAll(IpcChannels.UPDATE_STATE_CHANNEL, state);
+
+  const emitState = stateTransitionSemaphore.withPermits(1)(
+    Ref.get(updateStateRef).pipe(Effect.flatMap(broadcastState)),
   );
 
-  const setState = (state: DesktopUpdateState): Effect.Effect<void> =>
-    Ref.set(updateStateRef, state).pipe(Effect.andThen(emitState));
+  const replaceState = (state: DesktopUpdateState): Effect.Effect<void> =>
+    stateTransitionSemaphore.withPermits(1)(
+      Ref.set(updateStateRef, state).pipe(Effect.andThen(broadcastState(state))),
+    );
 
   const updateState = (
     f: (state: DesktopUpdateState) => DesktopUpdateState,
   ): Effect.Effect<DesktopUpdateState> =>
-    Ref.get(updateStateRef).pipe(
-      Effect.flatMap((state) => {
-        const nextState = f(state);
-        return setState(nextState).pipe(Effect.as(nextState));
+    stateTransitionSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const result = yield* Ref.modify(updateStateRef, (state) => {
+          const nextState = f(state);
+          return [{ changed: nextState !== state, state: nextState }, nextState];
+        });
+        if (result.changed) {
+          yield* broadcastState(result.state);
+        }
+        return result.state;
       }),
     );
 
@@ -327,19 +357,24 @@ export const make = Effect.gen(function* () {
     return Option.none<"check" | "download" | "install">();
   });
 
+  const runningUpdateChannel = resolveDefaultDesktopUpdateChannel(environment.appVersion);
+  const allowsDowngradeForChannel = (channel: DesktopUpdateChannel): boolean =>
+    channel === "nightly" || channel !== runningUpdateChannel;
+
   const applyAutoUpdaterChannel = Effect.fn("desktop.updates.applyAutoUpdaterChannel")(function* (
     channel: DesktopUpdateChannel,
   ) {
     yield* Effect.annotateCurrentSpan({ channel });
     const allowsPrerelease = channel === "nightly";
+    const allowsDowngrade = allowsDowngradeForChannel(channel);
     yield* electronUpdater.setChannel(channel);
     yield* electronUpdater.setAllowPrerelease(allowsPrerelease);
-    yield* electronUpdater.setAllowDowngrade(allowsPrerelease);
+    yield* electronUpdater.setAllowDowngrade(allowsDowngrade);
     yield* electronUpdater.setFullChangelog(allowsPrerelease);
     yield* logUpdaterInfo("using update channel", {
       channel,
       allowPrerelease: allowsPrerelease,
-      allowDowngrade: allowsPrerelease,
+      allowDowngrade: allowsDowngrade,
       fullChangelog: allowsPrerelease,
     });
   });
@@ -353,7 +388,11 @@ export const make = Effect.gen(function* () {
     if (yield* Ref.get(updateCheckInFlightRef)) return false;
 
     const state = yield* Ref.get(updateStateRef);
-    if (state.status === "downloading" || state.status === "downloaded") {
+    const retryingFailedInstall = isFailedInstallState(state);
+    if (
+      state.status === "downloading" ||
+      (state.status === "downloaded" && !retryingFailedInstall)
+    ) {
       yield* logUpdaterInfo("skipping update check while update is active", {
         reason,
         status: state.status,
@@ -363,7 +402,24 @@ export const make = Effect.gen(function* () {
 
     yield* Ref.set(updateCheckInFlightRef, true);
     const checkedAt = yield* currentIsoTimestamp;
-    yield* setState(reduceDesktopUpdateStateOnCheckStart(state, checkedAt));
+    const checkingState = yield* updateState((current) => {
+      const currentFailedInstall = isFailedInstallState(current);
+      if (current.status === "downloaded" && !currentFailedInstall) {
+        return current;
+      }
+      return reduceDesktopUpdateStateOnCheckStart(
+        currentFailedInstall
+          ? { ...current, availableVersion: null, downloadedVersion: null }
+          : current,
+        checkedAt,
+      );
+    });
+    if (checkingState.status !== "checking") {
+      yield* Ref.set(updateCheckInFlightRef, false);
+      return false;
+    }
+    yield* Ref.set(installFailureClaimedRef, false);
+    yield* electronUpdater.setAllowDowngrade(allowsDowngradeForChannel(state.channel));
     yield* logUpdaterInfo("checking for updates", { reason });
 
     return yield* electronUpdater.checkForUpdates.pipe(
@@ -399,7 +455,7 @@ export const make = Effect.gen(function* () {
 
     yield* Ref.set(updateDownloadInFlightRef, true);
     return yield* Effect.gen(function* () {
-      yield* setState(reduceDesktopUpdateStateOnDownloadStart(state));
+      yield* updateState(reduceDesktopUpdateStateOnDownloadStart);
       yield* electronUpdater.setDisableDifferentialDownload(
         isArm64HostRunningIntelBuild(environment.runtimeInfo),
       );
@@ -446,21 +502,72 @@ export const make = Effect.gen(function* () {
     );
   }).pipe(Effect.withSpan("desktop.updates.downloadAvailableUpdate"));
 
-  const resetInstallAction = Effect.all(
-    [Ref.set(updateInstallInFlightRef, false), Ref.set(desktopState.quitting, false)],
-    { discard: true },
+  const recoverAfterInstallFailure = Effect.gen(function* () {
+    yield* Ref.set(desktopState.quitting, false);
+    const instances = yield* pool.list;
+    yield* Effect.forEach(instances, (instance) => instance.start, { concurrency: "unbounded" });
+    const primary = yield* pool.primary;
+    const ready = yield* primary.waitForReady(Duration.seconds(15));
+    if (!ready) {
+      return yield* Effect.die("Primary backend did not become ready after restart.");
+    }
+    yield* desktopWindow.revealOrCreateMain;
+  }).pipe(Effect.withSpan("desktop.updates.recoverAfterInstallFailure"));
+
+  const recoverOrQuitAfterInstallFailure = recoverAfterInstallFailure.pipe(
+    Effect.as(true),
+    Effect.catchCause((cause) =>
+      Effect.gen(function* () {
+        yield* Ref.set(desktopState.quitting, true);
+        yield* logUpdaterError("failed to recover after update installation failure", {
+          cause: Cause.pretty(cause),
+        });
+        yield* electronDialog
+          .showErrorBox(
+            "piCode could not recover from the update failure",
+            "The update could not be installed, and piCode could not reopen safely. The app will quit. Please reopen it and try again.",
+          )
+          .pipe(Effect.ensuring(electronApp.quit));
+        return false;
+      }).pipe(Effect.catchCause(() => Effect.succeed(false))),
+    ),
   );
+
+  const handleInstallFailure = Effect.fn("desktop.updates.handleInstallFailure")(function* (
+    message: string,
+    annotations: Readonly<Record<string, unknown>>,
+  ) {
+    yield* installFailureSemaphore.withPermits(1)(
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          if (yield* Ref.get(installFailureClaimedRef)) {
+            return;
+          }
+          yield* Ref.set(installFailureClaimedRef, true);
+          yield* logUpdaterError(message, annotations);
+          const recovered = yield* recoverOrQuitAfterInstallFailure;
+          if (recovered) {
+            yield* updateState((current) =>
+              reduceDesktopUpdateStateOnInstallFailure(current, message),
+            );
+          }
+        }).pipe(Effect.ensuring(Ref.set(updateInstallInFlightRef, false))),
+      ),
+    );
+  });
 
   const installDownloadedUpdate = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
     if (
       (yield* Ref.get(desktopState.quitting)) ||
       !(yield* Ref.get(updaterConfiguredRef)) ||
-      state.status !== "downloaded"
+      state.status !== "downloaded" ||
+      isFailedInstallState(state)
     ) {
       return { accepted: false, completed: false };
     }
 
+    yield* Ref.set(installFailureClaimedRef, false);
     yield* Ref.set(desktopState.quitting, true);
     yield* Ref.set(updateInstallInFlightRef, true);
 
@@ -486,34 +593,31 @@ export const make = Effect.gen(function* () {
       return { accepted: true, completed: false };
     }).pipe(
       Effect.catchTags({
-        ElectronUpdaterQuitAndInstallError: Effect.fn("desktop.updates.handleInstallFailure")(
-          function* (error) {
-            yield* resetInstallAction;
-            yield* updateState((current) =>
-              reduceDesktopUpdateStateOnInstallFailure(current, error.message),
-            );
-            yield* logUpdaterError(error.message, {
-              errorTag: error._tag,
-              channel: error.channel,
-              isSilent: error.isSilent,
-              isForceRunAfter: error.isForceRunAfter,
-            });
-            return { accepted: true, completed: false };
-          },
-        ),
+        ElectronUpdaterQuitAndInstallError: Effect.fn(
+          "desktop.updates.handleQuitAndInstallFailure",
+        )(function* (error) {
+          yield* handleInstallFailure(error.message, {
+            errorTag: error._tag,
+            channel: error.channel,
+            isSilent: error.isSilent,
+            isForceRunAfter: error.isForceRunAfter,
+          });
+          return { accepted: true, completed: false };
+        }),
       }),
-      Effect.onInterrupt(() => resetInstallAction),
+      Effect.onInterrupt(() =>
+        handleInstallFailure("Desktop update install action was interrupted.", {
+          action: "install",
+          interrupted: true,
+        }),
+      ),
       Effect.catchCause((cause) =>
         Effect.gen(function* () {
           if (Cause.hasInterruptsOnly(cause)) {
             return yield* Effect.failCause(cause);
           }
-          yield* resetInstallAction;
           const error = new DesktopUpdateUnexpectedActionError({ action: "install", cause });
-          yield* updateState((current) =>
-            reduceDesktopUpdateStateOnInstallFailure(current, error.message),
-          );
-          yield* logUpdaterError(error.message, {
+          yield* handleInstallFailure(error.message, {
             errorTag: error._tag,
             action: error.action,
           });
@@ -568,15 +672,20 @@ export const make = Effect.gen(function* () {
               channel: state.channel,
             });
             const checkedAt = yield* currentIsoTimestamp;
-            yield* setState(reduceDesktopUpdateStateOnNoUpdate(state, checkedAt));
+            yield* updateState((current) => reduceDesktopUpdateStateOnNoUpdate(current, checkedAt));
             yield* Ref.set(lastLoggedDownloadMilestoneRef, -1);
             return;
           }
 
           const checkedAt = yield* currentIsoTimestamp;
           const releaseNotes = normalizeDesktopUpdateReleaseNotes(info.releaseNotes, info.version);
-          yield* setState(
-            reduceDesktopUpdateStateOnUpdateAvailable(state, info.version, checkedAt, releaseNotes),
+          yield* updateState((current) =>
+            reduceDesktopUpdateStateOnUpdateAvailable(
+              current,
+              info.version,
+              checkedAt,
+              releaseNotes,
+            ),
           );
           yield* Ref.set(lastLoggedDownloadMilestoneRef, -1);
           yield* logUpdaterInfo("update available", {
@@ -600,8 +709,7 @@ export const make = Effect.gen(function* () {
 
   const handleUpdateNotAvailable = Effect.gen(function* () {
     const checkedAt = yield* currentIsoTimestamp;
-    const state = yield* Ref.get(updateStateRef);
-    yield* setState(reduceDesktopUpdateStateOnNoUpdate(state, checkedAt));
+    yield* updateState((current) => reduceDesktopUpdateStateOnNoUpdate(current, checkedAt));
     yield* Ref.set(lastLoggedDownloadMilestoneRef, -1);
     yield* logUpdaterInfo("no updates available");
   }).pipe(Effect.withSpan("desktop.updates.handleUpdateNotAvailable"));
@@ -614,13 +722,12 @@ export const make = Effect.gen(function* () {
       operation: Option.getOrElse(activeAction, () => "background" as const),
       cause,
     });
-    if (yield* Ref.get(updateInstallInFlightRef)) {
-      yield* Ref.set(updateInstallInFlightRef, false);
-      yield* Ref.set(desktopState.quitting, false);
-      yield* updateState((current) =>
-        reduceDesktopUpdateStateOnInstallFailure(current, error.message),
-      );
-      yield* logUpdaterError(error.message, {
+    const currentState = yield* Ref.get(updateStateRef);
+    if (
+      (yield* Ref.get(updateInstallInFlightRef)) ||
+      ((yield* Ref.get(installFailureClaimedRef)) && isFailedInstallState(currentState))
+    ) {
+      yield* handleInstallFailure(error.message, {
         errorTag: error._tag,
         operation: error.operation,
       });
@@ -653,11 +760,14 @@ export const make = Effect.gen(function* () {
     yield* decodeDownloadProgressInfo(raw).pipe(
       Effect.flatMap(
         Effect.fn("desktop.updates.applyDownloadProgress")(function* (progress) {
-          const state = yield* Ref.get(updateStateRef);
           const percent = Math.floor(progress.percent);
-          if (shouldBroadcastDownloadProgress(state, progress.percent) || state.message !== null) {
-            yield* setState(reduceDesktopUpdateStateOnDownloadProgress(state, progress.percent));
-          }
+          yield* updateState((current) =>
+            current.status === "downloaded" ||
+            (!shouldBroadcastDownloadProgress(current, progress.percent) &&
+              current.message === null)
+              ? current
+              : reduceDesktopUpdateStateOnDownloadProgress(current, progress.percent),
+          );
           const milestone = percent - (percent % 10);
           const lastLoggedMilestone = yield* Ref.get(lastLoggedDownloadMilestoneRef);
           if (milestone > lastLoggedMilestone) {
@@ -685,8 +795,9 @@ export const make = Effect.gen(function* () {
     yield* decodeUpdateInfo(raw).pipe(
       Effect.flatMap(
         Effect.fn("desktop.updates.applyUpdateDownloaded")(function* (info) {
-          const state = yield* Ref.get(updateStateRef);
-          yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, info.version));
+          yield* updateState((current) =>
+            reduceDesktopUpdateStateOnDownloadComplete(current, info.version),
+          );
           yield* logUpdaterInfo("update downloaded", { version: info.version });
         }),
       ),
@@ -725,7 +836,7 @@ export const make = Effect.gen(function* () {
 
       const settings = yield* desktopSettings.get;
       const enabled = yield* shouldEnableAutoUpdates;
-      yield* setState(createBaseUpdateState(settings.updateChannel, enabled, environment));
+      yield* replaceState(createBaseUpdateState(settings.updateChannel, enabled, environment));
       if (!enabled) {
         return;
       }
@@ -795,18 +906,14 @@ export const make = Effect.gen(function* () {
         );
 
       const enabled = yield* shouldEnableAutoUpdates;
-      yield* setState(createBaseUpdateState(nextChannel, enabled, environment));
+      yield* replaceState(createBaseUpdateState(nextChannel, enabled, environment));
 
       if (!enabled || !(yield* Ref.get(updaterConfiguredRef))) {
         return yield* Ref.get(updateStateRef);
       }
 
       yield* applyAutoUpdaterChannel(nextChannel);
-      const allowDowngrade = yield* electronUpdater.allowDowngrade;
-      yield* electronUpdater.setAllowDowngrade(true);
-      yield* checkForUpdates("channel-change").pipe(
-        Effect.ensuring(electronUpdater.setAllowDowngrade(allowDowngrade).pipe(Effect.ignore)),
-      );
+      yield* checkForUpdates("channel-change");
       return yield* Ref.get(updateStateRef);
     }),
     check: Effect.fn("desktop.updates.check")(function* (reason: string) {

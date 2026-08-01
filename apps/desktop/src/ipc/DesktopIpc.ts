@@ -120,6 +120,7 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpc["Service"] =>
     }: DesktopSyncIpcMethod<E, R>) {
       yield* Effect.annotateCurrentSpan({ channel });
       const context = yield* Effect.context<R>();
+      const runFork = Effect.runForkWith(context);
       const runSync = Effect.runSyncWith(context);
 
       yield* Effect.acquireRelease(
@@ -127,15 +128,20 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpc["Service"] =>
           try: () => {
             ipcMain.removeAllListeners(channel);
             ipcMain.on(channel, (event) => {
-              event.returnValue = runSync(
-                Effect.gen(function* () {
-                  yield* Effect.annotateCurrentSpan({ channel });
-                  return yield* handler();
-                }).pipe(
-                  Effect.annotateLogs({ channel }),
-                  Effect.withSpan("desktop.ipc.invokeSync"),
-                ),
-              );
+              try {
+                event.returnValue = runSync(
+                  Effect.gen(function* () {
+                    yield* Effect.annotateCurrentSpan({ channel });
+                    return yield* handler();
+                  }).pipe(
+                    Effect.annotateLogs({ channel }),
+                    Effect.withSpan("desktop.ipc.invokeSync"),
+                  ),
+                );
+              } catch (cause) {
+                event.returnValue = { _tag: "DesktopIpcSyncHandlerError", channel };
+                runFork(Effect.logError("desktop IPC sync handler failed", { channel, cause }));
+              }
             });
           },
           catch: (cause) =>

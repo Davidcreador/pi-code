@@ -24,6 +24,7 @@ function makeStubInstance(
 ): DesktopBackendPool.DesktopBackendInstance {
   const snapshot: DesktopBackendSnapshot = {
     desiredRunning: false,
+    startInProgress: false,
     ready: false,
     activePid: Option.none(),
     restartAttempt: 0,
@@ -58,6 +59,7 @@ function makePoolLayer(
         Layer.succeed(DesktopObservability.DesktopBackendOutputLogFactory, {
           forInstance: () =>
             Effect.succeed({
+              filePath: "/tmp/server-child.log",
               beginSession: () => Effect.void,
               writeOutputChunk: () => Effect.void,
               persistFailureSnapshot: () => Effect.void,
@@ -99,6 +101,29 @@ function makePoolLayer(
 }
 
 describe("DesktopBackendPool", () => {
+  it("formats the primary startup failure dialog with its child log path", () => {
+    assert.deepEqual(
+      DesktopBackendPool.primaryStartupFailureDialog({
+        reason: "code=1",
+        attempts: 5,
+        logPath: "/tmp/server-child.log",
+      }),
+      {
+        title: "piCode couldn't start",
+        content:
+          "The local backend exited 5 times before becoming ready.\n\nLast failure: code=1\n\nLogs: /tmp/server-child.log",
+      },
+    );
+    assert.include(
+      DesktopBackendPool.primaryStartupFailureDialog({
+        reason: "spawn failed",
+        attempts: 5,
+        logPath: null,
+      }).content,
+      "Logs: unavailable",
+    );
+  });
+
   it.effect("layerTest exposes registered instances by id", () =>
     Effect.gen(function* () {
       const pool = yield* DesktopBackendPool.DesktopBackendPool;

@@ -7,8 +7,10 @@ import {
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateErrorAffordance,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
+  requestDesktopUpdateCheck,
   resolveDesktopUpdateButtonAction,
   shouldShowArm64IntelBuildWarning,
   shouldShowDesktopUpdateButton,
@@ -17,6 +19,15 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Separator } from "../ui/separator";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+
+export function SidebarUpdateFailureContent({ label }: { readonly label: string }) {
+  return (
+    <span className="inline-flex items-center gap-2" data-update-error-affordance>
+      <TriangleAlertIcon className="size-3.5 text-destructive" />
+      <span>{label}</span>
+    </span>
+  );
+}
 
 function SidebarUpdateReleaseNotesTooltip({
   state,
@@ -57,13 +68,20 @@ function SidebarUpdateReleaseNotesTooltip({
   );
 }
 
+let dismissedForSession = false;
+
 export function SidebarUpdatePill() {
   const state = useDesktopUpdateState();
-  const [dismissed, setDismissed] = useState(false);
+  const [dismissed, setDismissed] = useState(dismissedForSession);
 
-  const visible = isElectron && shouldShowDesktopUpdateButton(state) && !dismissed;
+  const errorAffordance = getDesktopUpdateErrorAffordance(state);
+  const visible =
+    isElectron &&
+    (Boolean(errorAffordance) || (shouldShowDesktopUpdateButton(state) && !dismissed));
   const tooltip = state ? getDesktopUpdateButtonTooltip(state) : "Update available";
-  const disabled = isDesktopUpdateButtonDisabled(state);
+  const disabled = errorAffordance
+    ? !errorAffordance.canCheck
+    : isDesktopUpdateButtonDisabled(state);
   const action = state ? resolveDesktopUpdateButtonAction(state) : "none";
 
   const showArm64Warning = isElectron && shouldShowArm64IntelBuildWarning(state);
@@ -72,8 +90,34 @@ export function SidebarUpdatePill() {
 
   const handleAction = useCallback(() => {
     const bridge = window.desktopBridge;
-    if (!bridge || !state) return;
-    if (disabled || action === "none") return;
+    if (!bridge || !state || disabled) return;
+
+    if (action === "none") {
+      const check = requestDesktopUpdateCheck(state, () => bridge.checkForUpdate());
+      if (!check) return;
+      void check
+        .then((result) => {
+          if (result.checked) return;
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not check for updates",
+              description:
+                result.state.message ?? "Automatic updates are not available in this build.",
+            }),
+          );
+        })
+        .catch((error: unknown) => {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not check for updates",
+              description: error instanceof Error ? error.message : "Update check failed.",
+            }),
+          );
+        });
+      return;
+    }
 
     if (action === "download") {
       void bridge
@@ -153,11 +197,19 @@ export function SidebarUpdatePill() {
       )}
       {visible && (
         <div
-          className={`group/update relative flex h-7 w-full items-center rounded-lg bg-primary/15 text-xs font-medium text-primary ${
-            disabled ? " cursor-not-allowed opacity-60" : ""
-          }`}
+          className={`group/update relative flex h-7 w-full items-center rounded-lg text-xs font-medium ${
+            errorAffordance
+              ? "border border-destructive/32 bg-destructive/8 text-destructive-foreground"
+              : "bg-primary/15 text-primary"
+          }${disabled ? " cursor-not-allowed opacity-60" : ""}`}
         >
-          <div className="pointer-events-none absolute inset-0 rounded-lg transition-colors group-has-[button.update-main:hover]/update:bg-primary/22" />
+          <div
+            className={`pointer-events-none absolute inset-0 rounded-lg transition-colors ${
+              errorAffordance
+                ? "group-has-[button.update-main:hover]/update:bg-destructive/12"
+                : "group-has-[button.update-main:hover]/update:bg-primary/22"
+            }`}
+          />
           <Tooltip>
             <TooltipTrigger
               render={
@@ -169,7 +221,9 @@ export function SidebarUpdatePill() {
                   className="update-main relative flex h-full flex-1 items-center gap-2 px-2 enabled:cursor-pointer"
                   onClick={handleAction}
                 >
-                  {action === "install" ? (
+                  {errorAffordance ? (
+                    <SidebarUpdateFailureContent label={errorAffordance.label} />
+                  ) : action === "install" ? (
                     <>
                       <RotateCwIcon className="size-3.5" />
                       <span>Restart to update</span>
@@ -209,7 +263,7 @@ export function SidebarUpdatePill() {
               )}
             </TooltipPopup>
           </Tooltip>
-          {action === "download" && (
+          {action === "download" && !errorAffordance && (
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -217,7 +271,10 @@ export function SidebarUpdatePill() {
                     type="button"
                     aria-label="Dismiss update"
                     className="mr-1 inline-flex size-5 items-center justify-center rounded-md text-primary/60 transition-colors hover:text-primary"
-                    onClick={() => setDismissed(true)}
+                    onClick={() => {
+                      dismissedForSession = true;
+                      setDismissed(true);
+                    }}
                   >
                     <XIcon className="size-3.5" />
                   </button>

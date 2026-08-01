@@ -15,17 +15,21 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 
+if (process.env.FAKE_PI_PID_MARKER) {
+  NodeFS.writeFileSync(process.env.FAKE_PI_PID_MARKER, String(process.pid));
+}
+
 if (process.env.FAKE_PI_EXIT_MARKER) {
   const markClosed = () => NodeFS.writeFileSync(process.env.FAKE_PI_EXIT_MARKER, "closed");
   process.on("exit", markClosed);
   process.on("SIGTERM", () => {
-    markClosed();
+    if (process.env.FAKE_PI_SIGTERM_MARKER) {
+      NodeFS.writeFileSync(process.env.FAKE_PI_SIGTERM_MARKER, "received");
+    }
+    if (process.env.FAKE_PI_IGNORE_SIGTERM_SESSION_ID === activeSessionId) return;
     process.exit(0);
   });
-  process.on("SIGINT", () => {
-    markClosed();
-    process.exit(0);
-  });
+  process.on("SIGINT", () => process.exit(0));
 }
 
 process.stdin.setEncoding("utf8");
@@ -38,6 +42,32 @@ let currentModel = { provider: "anthropic", id: "claude-haiku-4-5" };
 let currentThinkingLevel = "medium";
 let currentSessionName = "Fake session";
 let sessionSwitched = false;
+
+const respondCapabilities = (cmd) => {
+  if (process.env.FAKE_PI_CAPABILITIES === "error") {
+    w({
+      type: "response",
+      id: cmd.id,
+      command: "get_capabilities",
+      success: false,
+      error: "capability probe failed",
+    });
+    return;
+  }
+  w({
+    type: "response",
+    id: cmd.id,
+    command: "get_capabilities",
+    success: true,
+    data: {
+      protocolVersion: 1,
+      capabilities:
+        process.env.FAKE_PI_CAPABILITIES === "partial"
+          ? ["navigate_tree"]
+          : ["navigate_tree", "abort_branch_summary", "reload", "set_entry_label", "safe_settings", "scoped_models", "session_management", "project_trust", "changelog", "auth"],
+    },
+  });
+};
 
 // Two user turns on the active branch (u1 → a1 → u2 → a2), plus an abandoned
 // sibling branch off a1 that rollback must ignore.
@@ -75,31 +105,34 @@ process.stdin.on("data", (chunk) => {
     const cmd = JSON.parse(line);
     switch (cmd.type) {
       case "get_capabilities":
-        if (process.env.FAKE_PI_CAPABILITIES === "error") {
-          w({
-            type: "response",
-            id: cmd.id,
-            command: "get_capabilities",
-            success: false,
-            error: "capability probe failed",
-          });
+        if (process.env.FAKE_PI_HANG_SESSION_ID === activeSessionId) {
           break;
         }
-        w({
-          type: "response",
-          id: cmd.id,
-          command: "get_capabilities",
-          success: true,
-          data: {
-            protocolVersion: 1,
-            capabilities:
-              process.env.FAKE_PI_CAPABILITIES === "partial"
-                ? ["navigate_tree"]
-                : ["navigate_tree", "abort_branch_summary", "reload", "set_entry_label", "safe_settings", "scoped_models", "session_management", "project_trust", "changelog", "auth"],
-          },
-        });
+        if (
+          process.env.FAKE_PI_HOLD_CAPABILITIES_MARKER &&
+          process.env.FAKE_PI_HOLD_CAPABILITIES_SESSION_ID === activeSessionId
+        ) {
+          NodeFS.writeFileSync(process.env.FAKE_PI_HOLD_CAPABILITIES_MARKER, "waiting");
+          const poll = setInterval(() => {
+            if (
+              NodeFS.readFileSync(process.env.FAKE_PI_HOLD_CAPABILITIES_MARKER, "utf8") ===
+              "release"
+            ) {
+              clearInterval(poll);
+              respondCapabilities(cmd);
+            }
+          }, 5);
+          break;
+        }
+        respondCapabilities(cmd);
         break;
       case "get_state":
+        if (process.env.FAKE_PI_HANG_STATE_SESSION_ID === activeSessionId) {
+          if (process.env.FAKE_PI_STATE_MARKER) {
+            NodeFS.writeFileSync(process.env.FAKE_PI_STATE_MARKER, "waiting");
+          }
+          break;
+        }
         if (sessionSwitched && process.env.FAKE_PI_SWITCH_FAILURE === "state") {
           w({
             type: "response",
@@ -147,7 +180,17 @@ process.stdin.on("data", (chunk) => {
         w({ type: "response", id: cmd.id, command: cmd.type, success: true });
         break;
       case "prompt":
-        w({ type: "response", id: cmd.id, command: "prompt", success: true });
+        if (process.env.FAKE_PI_HOLD_PROMPT_MARKER) {
+          NodeFS.writeFileSync(process.env.FAKE_PI_HOLD_PROMPT_MARKER, "waiting");
+          const poll = setInterval(() => {
+            if (NodeFS.readFileSync(process.env.FAKE_PI_HOLD_PROMPT_MARKER, "utf8") === "release") {
+              clearInterval(poll);
+              w({ type: "response", id: cmd.id, command: "prompt", success: true });
+            }
+          }, 5);
+        } else {
+          w({ type: "response", id: cmd.id, command: "prompt", success: true });
+        }
         w({ type: "extension_ui_request", id: "ui-1", method: "setStatus", statusKey: "noise" });
         w({ type: "extension_ui_request", id: "ui-clear-status", method: "clearStatus", statusKey: "noise" });
         w({ type: "extension_ui_request", id: "ui-clear-widget", method: "clearWidget", widgetKey: "noise" });

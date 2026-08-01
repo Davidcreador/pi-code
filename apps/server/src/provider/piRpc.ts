@@ -14,9 +14,11 @@
  */
 import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -29,15 +31,23 @@ export class PiRpcError extends Data.TaggedError("PiRpcError")<{
 /** One decoded JSONL record from pi's stdout. */
 export type PiRpcRecord = Record<string, unknown>;
 
+export interface PiRpcRequestOptions {
+  /** `null` disables the timeout for an intentionally long-lived request. */
+  readonly timeout?: Duration.Input | null;
+}
+
 export interface PiRpcProcess {
   /** Fire-and-forget command (no response correlation). */
   readonly send: (command: PiRpcRecord) => Effect.Effect<void, PiRpcError>;
   /**
    * Send a command with a generated `id` and wait for the matching
    * `type: "response"` record. Fails when the response carries
-   * `success: false` or the process exits first.
+   * `success: false`, the request times out, or the process exits first.
    */
-  readonly request: (command: PiRpcRecord) => Effect.Effect<PiRpcRecord, PiRpcError>;
+  readonly request: (
+    command: PiRpcRecord,
+    options?: PiRpcRequestOptions,
+  ) => Effect.Effect<PiRpcRecord, PiRpcError>;
   /** Agent events (every stdout record that is not a correlated response). */
   readonly events: Stream.Stream<PiRpcRecord>;
   /** Resolves with the process exit code; never fails. */
@@ -50,8 +60,11 @@ export interface SpawnPiRpcInput {
   readonly args: ReadonlyArray<string>;
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly terminateGrace?: Duration.Input;
 }
 
+const DEFAULT_REQUEST_TIMEOUT = Duration.seconds(60);
+const DEFAULT_TERMINATE_GRACE = Duration.seconds(5);
 const encoder = new TextEncoder();
 const decodeJsonLine = Schema.decodeSync(Schema.UnknownFromJsonString);
 const encodeJsonLine = Schema.encodeSync(Schema.UnknownFromJsonString);
@@ -84,11 +97,14 @@ function responseError(operation: string, response: PiRpcRecord): PiRpcError {
  */
 export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcInput) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const processScope = yield* Scope.Scope;
 
   const handle = yield* spawner
     .spawn(
       ChildProcess.make(input.binaryPath, input.args, {
         cwd: input.cwd,
+        killSignal: "SIGTERM",
+        forceKillAfter: input.terminateGrace ?? DEFAULT_TERMINATE_GRACE,
         ...(input.environment ? { env: input.environment } : { extendEnv: true }),
       }),
     )
@@ -107,12 +123,32 @@ export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcIn
   const events = yield* Queue.unbounded<PiRpcRecord>();
   const pending = new Map<string, Deferred.Deferred<PiRpcRecord, PiRpcError>>();
   const exitFinalized = yield* Deferred.make<void>();
+  const terminationComplete = yield* Deferred.make<void, PiRpcError>();
   let exitFinalizationStarted = false;
+  let terminationStarted = false;
+  let transportFailure: PiRpcError | undefined;
   let exited = false;
   let requestSeq = 0;
 
+  const breakTransport = (cause: unknown) =>
+    Effect.suspend(() => {
+      if (exited || transportFailure !== undefined) return Effect.void;
+      const failure = new PiRpcError({
+        operation: "stdin",
+        detail: "pi stdin transport closed unexpectedly",
+        cause,
+      });
+      transportFailure = failure;
+      const waiting = [...pending.values()];
+      pending.clear();
+      return Effect.forEach(waiting, (deferred) => Deferred.fail(deferred, failure), {
+        discard: true,
+      }).pipe(Effect.andThen(Queue.shutdown(stdinQueue)));
+    });
+
   yield* Stream.run(Stream.fromQueue(stdinQueue), handle.stdin).pipe(
-    Effect.ignore,
+    Effect.exit,
+    Effect.flatMap((exit) => breakTransport(exit)),
     Effect.forkScoped,
   );
 
@@ -120,12 +156,11 @@ export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcIn
     Effect.suspend(() => {
       if (record.type === "response" && typeof record.id === "string") {
         const deferred = pending.get(record.id);
-        if (deferred !== undefined) {
-          pending.delete(record.id);
-          return record.success === false
-            ? Deferred.fail(deferred, responseError(String(record.command ?? "command"), record))
-            : Deferred.succeed(deferred, record);
-        }
+        if (deferred === undefined) return Effect.void;
+        pending.delete(record.id);
+        return record.success === false
+          ? Deferred.fail(deferred, responseError(String(record.command ?? "command"), record))
+          : Deferred.succeed(deferred, record);
       }
       return Queue.offer(events, record);
     });
@@ -189,8 +224,19 @@ export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcIn
 
   yield* awaitExit.pipe(Effect.flatMap(finalizeExit), Effect.forkScoped);
 
-  const terminate = handle.isRunning.pipe(
-    Effect.flatMap((running) => (running ? handle.kill() : Effect.void)),
+  const terminateProcess = Effect.gen(function* () {
+    const running = yield* handle.isRunning;
+    if (!running) {
+      yield* awaitExit.pipe(Effect.flatMap(finalizeExit));
+      return;
+    }
+
+    yield* handle.kill({
+      killSignal: "SIGTERM",
+      forceKillAfter: input.terminateGrace ?? DEFAULT_TERMINATE_GRACE,
+    });
+    yield* awaitExit.pipe(Effect.flatMap(finalizeExit));
+  }).pipe(
     Effect.mapError(
       (cause) =>
         new PiRpcError({
@@ -199,12 +245,33 @@ export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcIn
           cause,
         }),
     ),
-    Effect.andThen(awaitExit),
-    Effect.flatMap(finalizeExit),
+  );
+
+  const terminate = Effect.uninterruptibleMask((restore) =>
+    Effect.suspend(() => {
+      const awaitTermination = restore(Deferred.await(terminationComplete));
+      if (terminationStarted) return awaitTermination;
+      terminationStarted = true;
+      return terminateProcess.pipe(
+        Effect.exit,
+        Effect.flatMap((exit) => Deferred.done(terminationComplete, exit)),
+        Effect.forkIn(processScope),
+        Effect.andThen(awaitTermination),
+      );
+    }),
   );
 
   const send = (command: PiRpcRecord) =>
     Effect.suspend(() => {
+      if (transportFailure !== undefined) {
+        return Effect.fail(
+          new PiRpcError({
+            operation: String(command.type ?? "send"),
+            detail: transportFailure.detail,
+            cause: transportFailure,
+          }),
+        );
+      }
       if (exited) {
         return Effect.fail(
           new PiRpcError({
@@ -225,15 +292,30 @@ export const spawnPiRpc = Effect.fn("spawnPiRpc")(function* (input: SpawnPiRpcIn
       );
     });
 
-  const request = (command: PiRpcRecord) =>
+  const request = (command: PiRpcRecord, options?: PiRpcRequestOptions) =>
     Effect.gen(function* () {
       const id = `t3-${++requestSeq}`;
+      const operation = String(command.type ?? "request");
       const deferred = yield* Deferred.make<PiRpcRecord, PiRpcError>();
       pending.set(id, deferred);
-      yield* send({ ...command, id }).pipe(
-        Effect.tapError(() => Effect.sync(() => pending.delete(id))),
-      );
-      return yield* Deferred.await(deferred);
+      return yield* Effect.gen(function* () {
+        yield* send({ ...command, id });
+        const response = Deferred.await(deferred);
+        return yield* options?.timeout === null
+          ? response
+          : response.pipe(
+              Effect.timeoutOrElse({
+                duration: options?.timeout ?? DEFAULT_REQUEST_TIMEOUT,
+                orElse: () =>
+                  Effect.fail(
+                    new PiRpcError({
+                      operation,
+                      detail: `pi RPC request '${operation}' timed out`,
+                    }),
+                  ),
+              }),
+            );
+      }).pipe(Effect.ensuring(Effect.sync(() => pending.delete(id))));
     });
 
   return {

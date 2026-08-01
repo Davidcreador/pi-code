@@ -286,6 +286,8 @@ describe("DesktopSettings", () => {
           mainWindowMaximized: true,
           serverExposureMode: "network-accessible",
         } satisfies typeof DesktopSettingsPatch.Type);
+        const fileInfo = yield* fileSystem.stat(environment.desktopSettingsPath);
+        assert.equal(fileInfo.mode & 0o777, 0o600);
       }),
     ),
   );

@@ -368,9 +368,9 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                 startedAt,
                 finishedAt,
                 message: couldNotVerify
-                  ? "Update command completed, but d4 could not verify the provider version."
+                  ? "Update command completed, but piCode could not verify the provider version."
                   : stillOutdated
-                    ? "Update command completed, but d4 still detects an outdated provider version."
+                    ? "Update command completed, but piCode still detects an outdated provider version."
                     : "Provider updated.",
                 output: commandOutput(result),
               }),

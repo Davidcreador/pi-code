@@ -2,35 +2,54 @@ import { describe, expect, it } from "vite-plus/test";
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
 
 import {
+  createInitialDesktopUpdateState,
+  reduceDesktopUpdateStateOnDownloadComplete,
+  reduceDesktopUpdateStateOnDownloadFailure,
+  reduceDesktopUpdateStateOnDownloadStart,
+  reduceDesktopUpdateStateOnInstallFailure,
+  reduceDesktopUpdateStateOnUpdateAvailable,
+} from "../../../desktop/src/updates/updateMachine.ts";
+import {
   canCheckForUpdate,
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateErrorAffordance,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
+  shouldHighlightDesktopUpdateError,
   shouldShowArm64IntelBuildWarning,
   shouldShowDesktopUpdateButton,
   shouldToastDesktopUpdateActionResult,
 } from "./desktopUpdate.logic";
 
-const baseState: DesktopUpdateState = {
-  enabled: true,
-  status: "idle",
-  channel: "latest",
-  currentVersion: "1.0.0",
+const runtimeInfo = {
   hostArch: "x64",
   appArch: "x64",
   runningUnderArm64Translation: false,
-  availableVersion: null,
-  downloadedVersion: null,
-  releaseNotes: [],
-  downloadPercent: null,
-  checkedAt: null,
-  message: null,
-  errorContext: null,
-  canRetry: false,
+} as const;
+
+const baseState: DesktopUpdateState = {
+  ...createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest"),
+  enabled: true,
+  status: "idle",
 };
+
+const availableState = reduceDesktopUpdateStateOnUpdateAvailable(
+  baseState,
+  "1.1.0",
+  "2026-07-31T00:00:00.000Z",
+);
+const failedDownloadState = reduceDesktopUpdateStateOnDownloadFailure(
+  reduceDesktopUpdateStateOnDownloadStart(availableState),
+  "network timeout",
+);
+const downloadedState = reduceDesktopUpdateStateOnDownloadComplete(availableState, "1.1.0");
+const failedInstallState = reduceDesktopUpdateStateOnInstallFailure(
+  downloadedState,
+  "shutdown timeout",
+);
 
 describe("desktop update button state", () => {
   it("shows a download action when an update is available", () => {
@@ -43,33 +62,30 @@ describe("desktop update button state", () => {
     expect(resolveDesktopUpdateButtonAction(state)).toBe("download");
   });
 
-  it("keeps retry action available after a download error", () => {
-    const state: DesktopUpdateState = {
-      ...baseState,
-      status: "error",
-      availableVersion: "1.1.0",
-      message: "network timeout",
-      errorContext: "download",
-      canRetry: true,
-    };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
-    expect(resolveDesktopUpdateButtonAction(state)).toBe("download");
-    expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to retry");
+  it("keeps retry action and error treatment after a reducer download failure", () => {
+    expect(failedDownloadState.status).toBe("available");
+    expect(shouldShowDesktopUpdateButton(failedDownloadState)).toBe(true);
+    expect(resolveDesktopUpdateButtonAction(failedDownloadState)).toBe("download");
+    expect(getDesktopUpdateButtonTooltip(failedDownloadState)).toContain("network timeout");
+    expect(getDesktopUpdateButtonTooltip(failedDownloadState)).toContain("Click to retry");
+    expect(shouldHighlightDesktopUpdateError(failedDownloadState)).toBe(true);
   });
 
-  it("keeps install action available after an install error", () => {
-    const state: DesktopUpdateState = {
-      ...baseState,
-      status: "error",
-      downloadedVersion: "1.1.0",
-      availableVersion: "1.1.0",
+  it("replaces install retry with a check action after a reducer install failure", () => {
+    expect(failedInstallState.status).toBe("downloaded");
+    expect(shouldShowDesktopUpdateButton(failedInstallState)).toBe(false);
+    expect(resolveDesktopUpdateButtonAction(failedInstallState)).toBe("none");
+    expect(canCheckForUpdate(failedInstallState)).toBe(true);
+    expect(getDesktopUpdateButtonTooltip(failedInstallState)).toContain("shutdown timeout");
+    expect(getDesktopUpdateButtonTooltip(failedInstallState)).toContain(
+      "Check for updates before retrying",
+    );
+    expect(shouldHighlightDesktopUpdateError(failedInstallState)).toBe(true);
+    expect(getDesktopUpdateErrorAffordance(failedInstallState)).toEqual({
+      label: "Install failed — check again",
       message: "shutdown timeout",
-      errorContext: "install",
-      canRetry: true,
-    };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
-    expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
-    expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to retry");
+      canCheck: true,
+    });
   });
 
   it("prefers install when a downloaded version already exists", () => {
@@ -109,17 +125,14 @@ describe("desktop update button state", () => {
 
 describe("getDesktopUpdateActionError", () => {
   it("returns user-visible message for accepted failed attempts", () => {
+    const state = reduceDesktopUpdateStateOnDownloadFailure(
+      reduceDesktopUpdateStateOnDownloadStart(availableState),
+      "checksum mismatch",
+    );
     const result: DesktopUpdateActionResult = {
       accepted: true,
       completed: false,
-      state: {
-        ...baseState,
-        status: "available",
-        availableVersion: "1.1.0",
-        message: "checksum mismatch",
-        errorContext: "download",
-        canRetry: true,
-      },
+      state,
     };
     expect(getDesktopUpdateActionError(result)).toBe("checksum mismatch");
   });
@@ -214,7 +227,7 @@ describe("desktop update UI helpers", () => {
         availableVersion: "1.1.0",
         downloadedVersion: "1.1.1",
       }),
-    ).toContain("Install update 1.1.1 and restart d4?");
+    ).toContain("Install update 1.1.1 and restart piCode?");
   });
 
   it("falls back to generic install confirmation copy when no version is available", () => {
@@ -223,7 +236,7 @@ describe("desktop update UI helpers", () => {
         availableVersion: null,
         downloadedVersion: null,
       }),
-    ).toContain("Install update and restart d4?");
+    ).toContain("Install update and restart piCode?");
   });
 
   it("warns Windows users that a silent installation can take several minutes", () => {
@@ -272,15 +285,14 @@ describe("canCheckForUpdate", () => {
     );
   });
 
-  it("returns false once an update has been downloaded", () => {
-    expect(
-      canCheckForUpdate({
-        ...baseState,
-        status: "downloaded",
-        availableVersion: "1.1.0",
-        downloadedVersion: "1.1.0",
-      }),
-    ).toBe(false);
+  it("returns false once an update has been downloaded successfully", () => {
+    expect(canCheckForUpdate(downloadedState)).toBe(false);
+    expect(resolveDesktopUpdateButtonAction(downloadedState)).toBe("install");
+    expect(shouldHighlightDesktopUpdateError(downloadedState)).toBe(false);
+  });
+
+  it("returns true after an install failure so the user can manually re-check", () => {
+    expect(canCheckForUpdate(failedInstallState)).toBe(true);
   });
 
   it("returns true when idle", () => {

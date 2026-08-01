@@ -441,7 +441,16 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
                   }
                   break;
                 case "ConnectRequested":
+                  break;
                 case "Wakeup":
+                  if (
+                    probeEvent.signal.reason === "credentials-changed" &&
+                    target._tag === "RelayConnectionTarget"
+                  ) {
+                    yield* Fiber.interrupt(probe);
+                    yield* logManagedRelayAccountChange;
+                    return;
+                  }
                   break;
               }
             }

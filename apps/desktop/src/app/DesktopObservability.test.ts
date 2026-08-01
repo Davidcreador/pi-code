@@ -152,6 +152,7 @@ describe("DesktopObservability", () => {
       yield* Effect.gen(function* () {
         const factory = yield* DesktopObservability.DesktopBackendOutputLogFactory;
         const outputLog = yield* factory.forInstance("primary");
+        assert.equal(outputLog.filePath, logPath);
         yield* outputLog.beginSession({
           details: "pid=123 port=3773 cwd=/repo",
         });

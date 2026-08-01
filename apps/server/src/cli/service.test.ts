@@ -14,7 +14,7 @@ it("reports the installed service version and host paths", () => {
   assert.equal(
     formatServiceStatus(status, "0.0.29"),
     [
-      "d4 service",
+      "piCode service",
       "  Status: installed · t3@0.0.29",
       "  Unit: /home/me/.config/systemd/user/d4.service",
       "  Logs: /home/me/.d4/userdata/logs/boot-service.log",

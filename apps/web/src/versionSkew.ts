@@ -11,6 +11,7 @@ export interface VersionMismatch {
 }
 
 export const VERSION_MISMATCH_DISMISSALS_STORAGE_KEY = "t3code:version-mismatch-dismissals:v1";
+const VERSION_MISMATCH_DISMISSAL_LIMIT = 50;
 
 const VersionMismatchDismissalsSchema = Schema.Struct({
   keys: Schema.Array(Schema.String),
@@ -39,7 +40,7 @@ export function resolveVersionMismatch(
   return {
     clientVersion: normalizedClientVersion,
     serverVersion: normalizedServerVersion,
-    hint: "Version mismatch. Try syncing the client and server to the same d4 version.",
+    hint: "Version mismatch. Try syncing the client and server to the same piCode version.",
   };
 }
 
@@ -73,7 +74,7 @@ export function serverUpdateGuidance(
     case "respawn":
       return `Update the ${serverLabel} so they stay in sync.`;
     case "desktop-managed":
-      return `The ${serverLabel} is run by the d4 desktop app on its machine — update the desktop app there to sync them.`;
+      return `The ${serverLabel} is run by the piCode desktop app on its machine — update the desktop app there to sync them.`;
     default:
       return `Relaunch the ${serverLabel} with the copied command to sync them.`;
   }
@@ -128,7 +129,7 @@ export function dismissVersionMismatch(dismissalKey: string | null | undefined):
     return;
   }
   writeVersionMismatchDismissals({
-    keys: [...document.keys, dismissalKey],
+    keys: [...document.keys, dismissalKey].slice(-VERSION_MISMATCH_DISMISSAL_LIMIT),
   });
 }
 

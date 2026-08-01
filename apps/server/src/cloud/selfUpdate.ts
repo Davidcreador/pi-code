@@ -53,6 +53,7 @@ const RESTART_DELAY = Duration.seconds(2);
 const EXACT_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 export interface ServerSelfUpdateHost {
+  readonly pid: number;
   readonly execPath: string;
   readonly cliEntryPath: string;
   /** Original CLI arguments after the entry path, replayed on respawn. */
@@ -80,7 +81,7 @@ export function isPublishedCliEntry(entryPath: string): boolean {
 
 /**
  * The update path this process can offer, or null when only a manual
- * relaunch works. "desktop-managed" — the d4 desktop app spawned this
+ * relaunch works. "desktop-managed" — the piCode desktop app spawned this
  * backend and owns its version; only updating the app updates it.
  * "boot-service" — this is the systemd-supervised process from
  * bootService.ts: rewrite the unit and let systemd swap it. "respawn" — a
@@ -166,6 +167,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* (option
   });
 
   const host: ServerSelfUpdateHost = {
+    pid: options?.host?.pid ?? process.pid,
     execPath: options?.host?.execPath ?? hostExecPath,
     cliEntryPath: options?.host?.cliEntryPath ?? hostArguments[1] ?? "",
     cliArgs: options?.host?.cliArgs ?? hostArguments.slice(2),
@@ -230,7 +232,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* (option
   )(function* (input) {
     if (capability === "desktop-managed") {
       return yield* failWith(
-        "This server is managed by the d4 desktop app on its machine; update the desktop app to update it.",
+        "This server is managed by the piCode desktop app on its machine; update the desktop app to update it.",
       );
     }
     if (capability === null) {
@@ -391,8 +393,9 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* (option
         yield* host
           .spawnDetached("/bin/sh", [
             "-c",
-            'sleep 3; exec "$@"',
+            'old_pid=$1; shift; while kill -0 "$old_pid" 2>/dev/null; do sleep 0.1; done; exec "$@"',
             "t3-self-update",
+            String(host.pid),
             host.execPath,
             runtimePaths.entryPath,
             ...host.cliArgs,

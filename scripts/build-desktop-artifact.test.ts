@@ -91,8 +91,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "d4");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "d4 (Nightly)");
+    assert.equal(resolveDesktopProductName("0.0.17"), "piCode");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "piCode (Nightly)");
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -517,7 +517,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.notInclude(error.message, secret);
   });
 
-  it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
+  it.effect("adds passkey entitlements and the production protocol to signed macOS builds", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
         entitlementsPath: "/tmp/entitlements.mac.plist",
@@ -526,9 +526,29 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       const mac = config.mac as Record<string, unknown>;
       assert.equal(config.appId, "com.d4.desktop");
+      assert.equal(config.productName, "piCode");
+      assert.equal(config.artifactName, "piCode-${version}-${arch}.${ext}");
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
-      assert.deepStrictEqual(mac.protocols, [{ name: "d4", schemes: ["d4", "d4-dev"] }]);
+      assert.deepStrictEqual(mac.protocols, [{ name: "d4", schemes: ["d4"] }]);
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("uses the visible product name for Linux while preserving its WM class", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const linux = config.linux as Record<string, unknown>;
+      const desktop = linux.desktop as { readonly entry: Record<string, unknown> };
+      assert.equal(linux.executableName, "piCode");
+      assert.equal(desktop.entry.StartupWMClass, "d4");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
@@ -698,6 +718,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(resolved.platform, "win");
       assert.equal(resolved.target, "nsis");
       assert.equal(resolved.arch, "arm64");
+      assert.isTrue(resolved.cleanOutputDir);
     }),
   );
 
@@ -763,6 +784,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(resolved.signed, false);
       assert.equal(resolved.verbose, false);
       assert.equal(resolved.mockUpdates, false);
+      assert.isFalse(resolved.cleanOutputDir);
     }),
   );
 });

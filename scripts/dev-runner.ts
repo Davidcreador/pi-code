@@ -844,7 +844,7 @@ const devRunnerCli = Command.make("dev-runner", {
   ),
   t3Home: Flag.string("home-dir").pipe(
     Flag.withDescription(
-      "Explicit d4 data directory; runtime state is stored under userdata (equivalent to D4_HOME). Inside a git worktree this defaults to that worktree's own .d4 so dev state stays off the shared home.",
+      "Explicit piCode data directory; runtime state is stored under userdata (equivalent to D4_HOME). Inside a git worktree this defaults to that worktree's own .d4 so dev state stays off the shared home.",
     ),
     Flag.optional,
     Flag.map(Option.getOrUndefined),

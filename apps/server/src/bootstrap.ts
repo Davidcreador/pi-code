@@ -63,25 +63,43 @@ export class BootstrapEnvelopeDecodeError extends Schema.TaggedErrorClass<Bootst
   }
 }
 
+export class DesktopParentLivenessSetupError extends Schema.TaggedErrorClass<DesktopParentLivenessSetupError>()(
+  "DesktopParentLivenessSetupError",
+  {
+    reason: Schema.Literals(["missing-bootstrap-fd", "missing-bootstrap-envelope"]),
+    fd: Schema.optional(Schema.Number),
+  },
+) {
+  override get message(): string {
+    return this.fd === undefined
+      ? "Desktop parent liveness requires a bootstrap file descriptor."
+      : `Desktop parent liveness received no bootstrap envelope from file descriptor ${this.fd}.`;
+  }
+}
+
 export const BootstrapError = Schema.Union([
   BootstrapFdStatError,
   BootstrapInputStreamOpenError,
   BootstrapEnvelopeReadError,
   BootstrapEnvelopeDecodeError,
+  DesktopParentLivenessSetupError,
 ]);
 export type BootstrapError = typeof BootstrapError.Type;
+
+const preservedBootstrapStreams = new Map<number, NodeStream.Readable>();
 
 export const readBootstrapEnvelope = Effect.fn("readBootstrapEnvelope")(function* <A, I>(
   schema: Schema.Codec<A, I>,
   fd: number,
   options?: {
     timeoutMs?: number;
+    preserveFd?: boolean;
   },
 ): Effect.fn.Return<Option.Option<A>, BootstrapError> {
   const fdReady = yield* isFdReady(fd);
   if (!fdReady) return Option.none();
 
-  const stream = yield* makeBootstrapInputStream(fd);
+  const stream = yield* makeBootstrapInputStream(fd, options?.preserveFd === true);
 
   const timeoutMs = options?.timeoutMs ?? 1000;
 
@@ -94,35 +112,42 @@ export const readBootstrapEnvelope = Effect.fn("readBootstrapEnvelope")(function
       crlfDelay: Infinity,
     });
 
-    const cleanup = () => {
+    let settled = false;
+    const cleanup = (destroyStream: boolean) => {
       stream.removeListener("error", handleError);
       input.removeListener("line", handleLine);
       input.removeListener("close", handleClose);
       input.close();
-      stream.destroy();
+      if (destroyStream) stream.destroy();
+    };
+    const complete = (
+      effect: Effect.Effect<
+        Option.Option<A>,
+        BootstrapEnvelopeReadError | BootstrapEnvelopeDecodeError
+      >,
+      preserveStream = false,
+    ) => {
+      if (settled) return;
+      settled = true;
+      cleanup(!preserveStream);
+      if (preserveStream) preservedBootstrapStreams.set(fd, stream);
+      resume(effect);
     };
 
     const handleError = (error: Error) => {
-      if (isUnavailableBootstrapFdError(error)) {
-        resume(Effect.succeedNone);
-        return;
-      }
-      resume(
-        Effect.fail(
-          new BootstrapEnvelopeReadError({
-            fd,
-            cause: error,
-          }),
-        ),
+      complete(
+        isUnavailableBootstrapFdError(error)
+          ? Effect.succeedNone
+          : Effect.fail(new BootstrapEnvelopeReadError({ fd, cause: error })),
       );
     };
 
     const handleLine = (line: string) => {
       const parsed = decodeJsonResult(schema)(line);
       if (Result.isSuccess(parsed)) {
-        resume(Effect.succeedSome(parsed.success));
+        complete(Effect.succeedSome(parsed.success), options?.preserveFd === true);
       } else {
-        resume(
+        complete(
           Effect.fail(
             new BootstrapEnvelopeDecodeError({
               fd,
@@ -134,14 +159,16 @@ export const readBootstrapEnvelope = Effect.fn("readBootstrapEnvelope")(function
     };
 
     const handleClose = () => {
-      resume(Effect.succeedNone);
+      complete(Effect.succeedNone);
     };
 
     stream.once("error", handleError);
     input.once("line", handleLine);
     input.once("close", handleClose);
 
-    return Effect.sync(cleanup);
+    return Effect.sync(() => {
+      if (!settled) cleanup(true);
+    });
   }).pipe(Effect.timeoutOption(timeoutMs), Effect.map(Option.flatten));
 });
 
@@ -166,14 +193,17 @@ const isFdReady = (fd: number) =>
     }),
   );
 
-const makeBootstrapInputStream = (fd: number) =>
+const makeBootstrapInputStream = (fd: number, preserveFd = false) =>
   Effect.gen(function* () {
     const platform = yield* HostProcessPlatform;
-    const fdPath = resolveFdPath(fd, platform);
+    const fdPath =
+      fd === 0 || (preserveFd && !NodeFS.fstatSync(fd).isFile())
+        ? undefined
+        : resolveFdPath(fd, platform);
     return yield* Effect.try<NodeStream.Readable, BootstrapInputStreamOpenError>({
       try: () => {
         if (fdPath === undefined) {
-          return makeDirectBootstrapStream(fd);
+          return makeDirectBootstrapStream(fd, preserveFd);
         }
 
         let streamFd: number | undefined;
@@ -189,7 +219,7 @@ const makeBootstrapInputStream = (fd: number) =>
             if (streamFd !== undefined) {
               NodeFS.closeSync(streamFd);
             }
-            return makeDirectBootstrapStream(fd);
+            return makeDirectBootstrapStream(fd, preserveFd);
           }
           throw error;
         }
@@ -204,22 +234,25 @@ const makeBootstrapInputStream = (fd: number) =>
     });
   });
 
-const makeDirectBootstrapStream = (fd: number): NodeStream.Readable => {
-  try {
+const makeDirectBootstrapStream = (fd: number, preserveFd: boolean): NodeStream.Readable => {
+  if (fd === 0) {
+    process.stdin.setEncoding("utf8");
+    return process.stdin;
+  }
+  if (NodeFS.fstatSync(fd).isFile()) {
     return NodeFS.createReadStream("", {
       fd,
       encoding: "utf8",
-      autoClose: true,
+      autoClose: !preserveFd,
     });
-  } catch {
-    const stream = new NodeNet.Socket({
-      fd,
-      readable: true,
-      writable: false,
-    });
-    stream.setEncoding("utf8");
-    return stream;
   }
+  const stream = new NodeNet.Socket({
+    fd,
+    readable: true,
+    writable: false,
+  });
+  stream.setEncoding("utf8");
+  return stream;
 };
 
 // Stdin pipes inherited across the wsl.exe boundary report EACCES when we try
@@ -229,6 +262,82 @@ const isBootstrapFdPathDuplicationError = Predicate.compose(
   Predicate.hasProperty("code"),
   (_) => _.code === "ENXIO" || _.code === "EINVAL" || _.code === "EPERM" || _.code === "EACCES",
 );
+
+function waitForStreamEnd(stream: NodeStream.Readable, fd: number) {
+  return Effect.callback<void, BootstrapEnvelopeReadError>((resume) => {
+    const cleanup = () => {
+      stream.removeListener("error", handleError);
+      stream.removeListener("end", handleEnd);
+      stream.removeListener("close", handleEnd);
+    };
+    const handleError = (cause: Error) => {
+      cleanup();
+      resume(Effect.fail(new BootstrapEnvelopeReadError({ fd, cause })));
+    };
+    const handleEnd = () => {
+      cleanup();
+      resume(Effect.void);
+    };
+
+    stream.once("error", handleError);
+    stream.once("end", handleEnd);
+    stream.once("close", handleEnd);
+    if (stream.readableEnded || stream.destroyed) {
+      handleEnd();
+    } else {
+      stream.resume();
+    }
+
+    return Effect.sync(() => {
+      cleanup();
+      stream.destroy();
+    });
+  });
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Predicate.hasProperty(error, "code") && error.code === "EPERM";
+  }
+}
+
+export const waitForDesktopParentExit = Effect.fn("waitForDesktopParentExit")(function* (
+  fd: number,
+  desktopParentPid?: number,
+  initialParentPid = process.ppid,
+) {
+  const preservedStream = preservedBootstrapStreams.get(fd);
+  preservedBootstrapStreams.delete(fd);
+  const fdClosed = (
+    preservedStream === undefined
+      ? makeBootstrapInputStream(fd, true)
+      : Effect.succeed(preservedStream)
+  ).pipe(
+    Effect.flatMap((stream) => waitForStreamEnd(stream, fd)),
+    Effect.catchCause((cause) =>
+      Effect.logError("Desktop parent liveness pipe failed; stopping the server.", {
+        fd,
+        cause,
+      }),
+    ),
+  );
+  const parentExited = Effect.sleep("2 seconds").pipe(
+    Effect.andThen(
+      Effect.sync(() =>
+        desktopParentPid === undefined
+          ? initialParentPid <= 1 || process.ppid !== initialParentPid
+          : !isProcessAlive(desktopParentPid),
+      ),
+    ),
+    Effect.repeat({ while: (exited) => !exited }),
+    Effect.asVoid,
+  );
+
+  yield* Effect.raceFirst(fdClosed, parentExited);
+});
 
 function resolveFdPath(fd: number, platform: NodeJS.Platform): string | undefined {
   if (platform === "linux") {

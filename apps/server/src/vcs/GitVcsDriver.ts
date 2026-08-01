@@ -10,6 +10,7 @@ import * as Path from "effect/Path";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
+  CheckpointRef,
   GitCommandError,
   VcsProcessExitError,
   type VcsSwitchRefInput,
@@ -658,10 +659,10 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       const commitEnv: NodeJS.ProcessEnv = {
         ...process.env,
         GIT_INDEX_FILE: tempIndexPath,
-        GIT_AUTHOR_NAME: "d4",
-        GIT_AUTHOR_EMAIL: "d4@users.noreply.github.com",
-        GIT_COMMITTER_NAME: "d4",
-        GIT_COMMITTER_EMAIL: "d4@users.noreply.github.com",
+        GIT_AUTHOR_NAME: "piCode",
+        GIT_AUTHOR_EMAIL: "piCode@users.noreply.github.com",
+        GIT_COMMITTER_NAME: "piCode",
+        GIT_COMMITTER_EMAIL: "piCode@users.noreply.github.com",
       };
 
       const cleanupTempIndex = fileSystem
@@ -835,8 +836,24 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
 
     deleteCheckpointRefs: Effect.fn("GitVcsDriver.checkpoints.deleteCheckpointRefs")(
       function* (input) {
+        const checkpointRefs =
+          "checkpointRefs" in input
+            ? input.checkpointRefs
+            : yield* execute({
+                operation: "GitVcsDriver.checkpoints.listCheckpointRefs",
+                cwd: input.cwd,
+                args: ["for-each-ref", "--format=%(refname)", input.checkpointRefPrefix],
+              }).pipe(
+                Effect.map((result) =>
+                  result.stdout
+                    .split("\n")
+                    .filter((ref) => ref.length > 0)
+                    .map((ref) => CheckpointRef.make(ref)),
+                ),
+              );
+
         yield* Effect.forEach(
-          input.checkpointRefs,
+          checkpointRefs,
           (checkpointRef) =>
             execute({
               operation: "GitVcsDriver.checkpoints.deleteCheckpointRefs",

@@ -1,8 +1,8 @@
 Read `/Users/davecodes/.config/agent-harness/HARNESS.md` and follow it unless this file or the user overrides it.
 
-# d4
+# piCode
 
-d4 is a desktop GUI for the Pi coding agent. It keeps the T3 Code desktop/web UX and event-sourced server architecture, but Pi is the only agent provider.
+piCode is a desktop GUI for the Pi coding agent. It keeps the T3 Code desktop/web UX and event-sourced server architecture, but Pi is the only agent provider.
 
 ## Product boundaries
 
@@ -14,7 +14,7 @@ d4 is a desktop GUI for the Pi coding agent. It keeps the T3 Code desktop/web UX
 
 ## Identity and state
 
-- Product name: `d4`
+- Product name: `piCode`
 - Production data home: `~/.d4`; runtime state: `~/.d4/userdata`
 - Development state: `~/.d4/dev`, or `<worktree>/.d4/userdata` in linked worktrees
 - Explicit override: `D4_HOME` or `--base-dir`

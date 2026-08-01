@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
@@ -411,6 +412,7 @@ export const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
   const stateRef = yield* Ref.make(initialRuntimeState());
+  const settingsMutationMutex = yield* Semaphore.make(1);
 
   // Cache the `tailscale status` spawn for the TTL. On macOS, the Mac App
   // Store Tailscale CLI lives inside Tailscale's sandbox container, so each
@@ -446,7 +448,7 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const setMode = Effect.fn("desktop.serverExposure.setMode")(function* (
+  const setModeUnlocked = Effect.fn("desktop.serverExposure.setMode")(function* (
     mode: DesktopServerExposureMode,
   ) {
     yield* Effect.annotateCurrentSpan({ mode });
@@ -479,47 +481,65 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-    yield* Ref.set(stateRef, resolved.state);
+    const reconciled = resolveRuntimeState({
+      requestedMode: change.settings.serverExposureMode,
+      settings: change.settings,
+      port: previous.port,
+      networkInterfaces: currentNetworkInterfaces,
+      advertisedHostOverride: config.desktopLanHostOverride,
+    });
+    yield* Ref.set(stateRef, reconciled.state);
     return {
-      state: toContractState(resolved.state),
-      requiresRelaunch: change.changed || requiresBackendRelaunch(previous, resolved.state),
+      state: toContractState(reconciled.state),
+      requiresRelaunch: change.changed || requiresBackendRelaunch(previous, reconciled.state),
     };
   });
 
-  const setTailscaleServeEnabled = Effect.fn("desktop.serverExposure.setTailscaleServeEnabled")(
-    function* (input: { readonly enabled: boolean; readonly port?: number }) {
-      yield* Effect.annotateCurrentSpan({
+  const setMode = (mode: DesktopServerExposureMode) =>
+    setModeUnlocked(mode).pipe(settingsMutationMutex.withPermits(1));
+
+  const setTailscaleServeEnabledUnlocked = Effect.fn(
+    "desktop.serverExposure.setTailscaleServeEnabled",
+  )(function* (input: { readonly enabled: boolean; readonly port?: number }) {
+    yield* Effect.annotateCurrentSpan({
+      enabled: input.enabled,
+      ...(input.port === undefined ? {} : { port: input.port }),
+    });
+    const result = yield* desktopSettings
+      .setTailscaleServe({
         enabled: input.enabled,
-        ...(input.port === undefined ? {} : { port: input.port }),
-      });
-      const result = yield* desktopSettings
-        .setTailscaleServe({
-          enabled: input.enabled,
-          port: Option.fromNullishOr(input.port),
-        })
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new DesktopTailscaleServePersistenceError({
-                enabled: input.enabled,
-                port: input.port ?? null,
-                cause,
-              }),
-          ),
-        );
+        port: Option.fromNullishOr(input.port),
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new DesktopTailscaleServePersistenceError({
+              enabled: input.enabled,
+              port: input.port ?? null,
+              cause,
+            }),
+        ),
+      );
 
-      const nextState = yield* Ref.updateAndGet(stateRef, (current) => ({
-        ...current,
-        tailscaleServeEnabled: result.settings.tailscaleServeEnabled,
-        tailscaleServePort: result.settings.tailscaleServePort,
-      }));
+    const previous = yield* Ref.get(stateRef);
+    const currentNetworkInterfaces = yield* readNetworkInterfaces;
+    const reconciled = resolveRuntimeState({
+      requestedMode: result.settings.serverExposureMode,
+      settings: result.settings,
+      port: previous.port,
+      networkInterfaces: currentNetworkInterfaces,
+      advertisedHostOverride: config.desktopLanHostOverride,
+    });
+    yield* Ref.set(stateRef, reconciled.state);
 
-      return {
-        state: toContractState(nextState),
-        requiresRelaunch: result.changed,
-      };
-    },
-  );
+    return {
+      state: toContractState(reconciled.state),
+      requiresRelaunch: result.changed || requiresBackendRelaunch(previous, reconciled.state),
+    };
+  });
+
+  const setTailscaleServeEnabled = (input: { readonly enabled: boolean; readonly port?: number }) =>
+    setTailscaleServeEnabledUnlocked(input).pipe(settingsMutationMutex.withPermits(1));
 
   const getAdvertisedEndpoints = Effect.gen(function* () {
     const state = yield* Ref.get(stateRef);

@@ -1,8 +1,8 @@
-# d4
+# piCode
 
-d4 is an installable desktop GUI for the [Pi coding agent](https://pi.dev). It keeps the UI and event-sourced architecture of [T3 Code](https://github.com/pingdotgg/t3code), while using Pi as its only agent provider.
+piCode is an installable desktop GUI for the [Pi coding agent](https://pi.dev). It keeps the UI and event-sourced architecture of [T3 Code](https://github.com/pingdotgg/t3code), while using Pi as its only agent provider.
 
-Pi supplies the model catalog, provider credentials, sessions, extensions, skills, prompt templates, and compaction. d4 talks to Pi through its RPC protocol instead of adding adapters for other coding harnesses.
+Pi supplies the model catalog, provider credentials, sessions, extensions, skills, prompt templates, and compaction. piCode talks to Pi through its RPC protocol instead of adding adapters for other coding harnesses.
 
 ## Requirements
 
@@ -32,9 +32,11 @@ vp run build:resource-monitor
 vp run dist:desktop:dmg:arm64
 ```
 
-The macOS installer is written to `release/d4-<version>-arm64.dmg`.
+The macOS installer is written to `release/piCode-<version>-arm64.dmg`.
 
-The packaged app includes Electron, the web renderer, and the local server. It stores production state under `~/.d4/userdata`, uses the `d4` Electron profile, registers `d4://`, and has bundle ID `com.d4.desktop`.
+The packaged app includes Electron, the web renderer, and the local server. For compatibility, it continues to store production state under `~/.d4/userdata`, use the `d4` Electron profile, register `d4://`, and use bundle ID `com.d4.desktop`; no state migration is required.
+
+On macOS, an in-place auto-update of an older installation may keep the existing `d4.app` folder name even though the app's contents and visible branding become piCode. This is expected and cosmetic; fresh installs use `piCode.app`.
 
 ## Verification
 
@@ -45,7 +47,7 @@ vp run --filter t3 typecheck
 vp run --filter @t3tools/web typecheck
 ```
 
-Use a temporary `D4_HOME` for smoke tests and packaged launches. Never point d4 development or tests at T3 Code's `~/.t3/userdata`.
+Use a temporary `D4_HOME` for smoke tests and packaged launches. Never point piCode development or tests at T3 Code's `~/.t3/userdata`.
 
 ## Pi integration
 
@@ -53,4 +55,4 @@ See [docs/providers/pi.md](./docs/providers/pi.md) for the RPC adapter, supporte
 
 ## Attribution
 
-d4 is derived from T3 Code, licensed under MIT. See [LICENSE](./LICENSE).
+piCode is derived from T3 Code, licensed under MIT. See [LICENSE](./LICENSE).

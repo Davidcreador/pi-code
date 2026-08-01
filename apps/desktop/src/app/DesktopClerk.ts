@@ -9,9 +9,13 @@ import * as Scope from "effect/Scope";
 
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import { makeComponentLogger } from "./DesktopObservability.ts";
+
+const { logWarning: logDesktopClerkWarning } = makeComponentLogger("desktop-clerk");
 
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
 
@@ -47,7 +51,10 @@ export class DesktopClerk extends Context.Service<
     readonly configure: Effect.Effect<
       void,
       never,
-      ElectronApp.ElectronApp | ElectronWindow.ElectronWindow | Scope.Scope
+      | ElectronApp.ElectronApp
+      | ElectronDialog.ElectronDialog
+      | ElectronWindow.ElectronWindow
+      | Scope.Scope
     >;
   }
 >()("@t3tools/desktop/app/DesktopClerk") {}
@@ -109,11 +116,21 @@ export const make = Effect.gen(function* () {
   return DesktopClerk.of({
     configure: Effect.gen(function* () {
       const electronApp = yield* ElectronApp.ElectronApp;
+      const electronDialog = yield* ElectronDialog.ElectronDialog;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
       const context = yield* Effect.context<ElectronWindow.ElectronWindow>();
       const runPromise = Effect.runPromiseWith(context);
 
       if (!(yield* electronApp.requestSingleInstanceLock)) {
+        yield* logDesktopClerkWarning("single-instance lock denied", {
+          stateDir: environment.stateDir,
+          profile: environment.userDataDirName,
+          isDevelopment: environment.isDevelopment,
+        });
+        yield* electronDialog.showErrorBox(
+          "piCode is already running",
+          "piCode is already running — or an older d4 build is. Quit the other app and try again.",
+        );
         yield* electronApp.quit;
         return yield* Effect.interrupt;
       }

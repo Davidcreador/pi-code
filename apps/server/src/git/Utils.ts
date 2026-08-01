@@ -1,7 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off
-import * as NodeFS from "node:fs";
-import * as NodePath from "node:path";
+import type { VcsDriver } from "../vcs/VcsDriver.ts";
 
-export function isGitRepository(cwd: string): boolean {
-  return NodeFS.existsSync(NodePath.join(cwd, ".git"));
+export function isGitRepository(driver: VcsDriver["Service"], cwd: string) {
+  return driver.isInsideWorkTree(cwd);
 }

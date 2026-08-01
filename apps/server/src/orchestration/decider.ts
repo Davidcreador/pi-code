@@ -13,6 +13,7 @@ import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
   listThreadsByProjectId,
   requireActiveProjectWorkspaceRootAbsent,
+  requireActiveThread,
   requireProject,
   requireProjectAbsent,
   requireThread,
@@ -711,7 +712,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.start": {
-      const targetThread = yield* requireThread({
+      const targetThread = yield* requireActiveThread({
         readModel,
         command,
         threadId: command.threadId,
@@ -898,11 +899,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.checkpoint.revert": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (thread.session?.status === "starting" || thread.session?.status === "running") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} has an active session and cannot be reverted`,
+        });
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -941,7 +948,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.session.set": {
-      const thread = yield* requireThread({
+      const thread = yield* requireActiveThread({
         readModel,
         command,
         threadId: command.threadId,

@@ -22,7 +22,7 @@ describe("versionSkew", () => {
     expect(resolveVersionMismatch("9.9.9")).toEqual({
       clientVersion: APP_VERSION,
       serverVersion: "9.9.9",
-      hint: "Version mismatch. Try syncing the client and server to the same d4 version.",
+      hint: "Version mismatch. Try syncing the client and server to the same piCode version.",
     });
   });
 
@@ -70,11 +70,19 @@ describe("versionSkew", () => {
     ).toBe(false);
   });
 
+  it("caps stored mismatch dismissals", () => {
+    const keys = Array.from({ length: 51 }, (_, index) => `version-cap-${index}`);
+    for (const key of keys) dismissVersionMismatch(key);
+
+    expect(isVersionMismatchDismissed(keys[0])).toBe(false);
+    expect(isVersionMismatchDismissed(keys.at(-1))).toBe(true);
+  });
+
   it("appends a hint to connection errors when versions differ", () => {
     const mismatch = resolveVersionMismatch("9.9.9");
 
     expect(appendVersionMismatchHint("Socket closed.", mismatch)).toBe(
-      "Socket closed. Hint: Version mismatch. Try syncing the client and server to the same d4 version.",
+      "Socket closed. Hint: Version mismatch. Try syncing the client and server to the same piCode version.",
     );
   });
 
@@ -101,7 +109,7 @@ describe("versionSkew", () => {
       "Update the Remote server so they stay in sync.",
     );
     expect(serverUpdateGuidance("desktop-managed", "Desktop server")).toBe(
-      "The Desktop server is run by the d4 desktop app on its machine — update the desktop app there to sync them.",
+      "The Desktop server is run by the piCode desktop app on its machine — update the desktop app there to sync them.",
     );
     expect(serverUpdateGuidance(null, "Local server")).toBe(
       "Relaunch the Local server with the copied command to sync them.",

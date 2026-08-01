@@ -14,6 +14,16 @@ import * as DesktopState from "./DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 
 describe("DesktopLifecycle", () => {
+  it("recognizes only the dev-runner shutdown IPC message", () => {
+    assert.isTrue(
+      DesktopLifecycle.isDesktopDevShutdownMessage({
+        type: DesktopLifecycle.DESKTOP_DEV_SHUTDOWN_MESSAGE,
+      }),
+    );
+    assert.isFalse(DesktopLifecycle.isDesktopDevShutdownMessage({ type: "other" }));
+    assert.isFalse(DesktopLifecycle.isDesktopDevShutdownMessage(null));
+  });
+
   for (const platform of ["darwin", "win32", "linux"] satisfies ReadonlyArray<NodeJS.Platform>) {
     it.effect(`lets the updater's quit event proceed on ${platform}`, () => {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();

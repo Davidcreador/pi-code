@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { DEFAULT_MODEL, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { DEFAULT_MODEL, defaultInstanceIdForDriver, ProjectId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -14,13 +14,19 @@ import * as ServerConfig from "./config.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+import { BUILT_IN_DRIVERS } from "./provider/builtInDrivers.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 
-it("uses the canonical Codex default for auto-bootstrapped model selection", () => {
-  assert.deepStrictEqual(ServerRuntimeStartup.getAutoBootstrapDefaultModelSelection(), {
-    instanceId: ProviderInstanceId.make("codex"),
-    model: DEFAULT_MODEL,
-  });
+it("uses a built-in provider for auto-bootstrapped model selection", () => {
+  const selection = ServerRuntimeStartup.getAutoBootstrapDefaultModelSelection();
+
+  assert.equal(selection.model, DEFAULT_MODEL);
+  assert.isTrue(
+    BUILT_IN_DRIVERS.some(
+      (driver) => defaultInstanceIdForDriver(driver.driverKind) === selection.instanceId,
+    ),
+    `Expected ${selection.instanceId} to resolve to a built-in provider`,
+  );
 });
 
 it.effect("enqueueCommand waits for readiness and then drains queued work", () =>

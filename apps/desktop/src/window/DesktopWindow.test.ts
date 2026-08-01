@@ -186,6 +186,7 @@ function makeTestLayer(input: {
     bounds: DesktopAppSettings.DesktopWindowBounds,
   ) => Effect.Effect<void>;
   readonly openedExternalUrls?: unknown[];
+  readonly beforeCreate?: Effect.Effect<void>;
 }) {
   let desktopSettings = input.desktopSettings ?? DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS;
   const desktopAppSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
@@ -223,9 +224,12 @@ function makeTestLayer(input: {
 
   const electronWindowLayer = Layer.succeed(ElectronWindow.ElectronWindow, {
     create: (options) =>
-      Effect.sync(() => {
-        input.createdWindowOptions?.push(options);
-      }).pipe(
+      (input.beforeCreate ?? Effect.void).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            input.createdWindowOptions?.push(options);
+          }),
+        ),
         Effect.andThen(Ref.update(input.createCount, (count) => count + 1)),
         Effect.as(input.window),
       ),
@@ -435,6 +439,40 @@ describe("DesktopWindow", () => {
         assert.deepEqual(fakeWindow.loadURL.mock.calls[0], ["d4-dev://app/"]);
         assert.equal(fakeWindow.openDevTools.mock.calls.length, 1);
       }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("serializes concurrent main window creation", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const createStarted = yield* Deferred.make<void>();
+      const releaseCreate = yield* Deferred.make<void>();
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        beforeCreate: Deferred.succeed(createStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseCreate)),
+        ),
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        const first = yield* desktopWindow.createMain.pipe(Effect.forkChild);
+        yield* Deferred.await(createStarted);
+        const second = yield* desktopWindow.createMain.pipe(Effect.forkChild);
+        yield* Deferred.succeed(releaseCreate, undefined);
+        const [firstWindow, secondWindow] = yield* Effect.all([
+          Fiber.join(first),
+          Fiber.join(second),
+        ]);
+
+        assert.strictEqual(firstWindow, fakeWindow.window);
+        assert.strictEqual(secondWindow, fakeWindow.window);
+        assert.equal(yield* Ref.get(createCount), 1);
+      }).pipe(Effect.provide(layer), Effect.scoped);
     }),
   );
 

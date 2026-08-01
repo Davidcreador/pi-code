@@ -188,6 +188,18 @@ describe("composerDraftStore addImages", () => {
     URL.revokeObjectURL = originalRevokeObjectUrl;
   });
 
+  it("revokes incoming blob URLs when the draft target cannot be resolved", () => {
+    const first = makeImage({ id: "img-missing-1", previewUrl: "blob:missing-1" });
+    const second = makeImage({ id: "img-missing-2", previewUrl: "blob:missing-2" });
+    const missingDraft = DraftId.make("missing-draft");
+
+    useComposerDraftStore.getState().addImage(missingDraft, first);
+    useComposerDraftStore.getState().addImages(DraftId.make(""), [second]);
+
+    expect(revokeSpy).toHaveBeenCalledWith("blob:missing-1");
+    expect(revokeSpy).toHaveBeenCalledWith("blob:missing-2");
+  });
+
   it("deduplicates identical images in one batch by file signature", () => {
     const first = makeImage({
       id: "img-1",

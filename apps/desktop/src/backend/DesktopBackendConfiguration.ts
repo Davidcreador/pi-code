@@ -383,6 +383,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       t3Home: environment.baseDir,
       host: backendExposure.bindHost,
       desktopBootstrapToken: input.bootstrapToken,
+      desktopParentPid: process.pid,
       tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,
       tailscaleServePort: backendExposure.tailscaleServePort,
       desktopTelemetryFd: 4,
@@ -396,7 +397,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
 
     return {
       executablePath: process.execPath,
-      args: [environment.backendEntryPath, "--bootstrap-fd", "3"],
+      args: [environment.backendEntryPath, "--bootstrap-fd", "3", "--desktop-parent-liveness"],
       entryPath: environment.backendEntryPath,
       cwd: environment.backendCwd,
       env: {
@@ -599,6 +600,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
       preflight.linuxEntryPath,
       "--bootstrap-fd",
       "0",
+      "--desktop-parent-liveness",
       ...devUrlArgs,
     ],
     preflightFailure: Option.none(),

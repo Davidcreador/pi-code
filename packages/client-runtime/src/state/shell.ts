@@ -214,7 +214,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       }),
       {
         onExpectedFailure: (cause) => setStreamError(Cause.squash(cause)),
-        retryExpectedFailureAfter: "250 millis",
+        shouldRetryExpectedFailure: () => true,
         resubscribe: foregroundResubscriptions,
       },
     ).pipe(Stream.runForEach(applyItem)),

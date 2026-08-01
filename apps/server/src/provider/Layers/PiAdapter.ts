@@ -54,6 +54,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -76,7 +77,13 @@ import {
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { PiNativeAdapterShape } from "../Services/PiNativeAdapter.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
-import { PiRpcError, type PiRpcProcess, type PiRpcRecord, spawnPiRpc } from "../piRpc.ts";
+import {
+  PiRpcError,
+  type PiRpcProcess,
+  type PiRpcRecord,
+  type PiRpcRequestOptions,
+  spawnPiRpc,
+} from "../piRpc.ts";
 import { piRpcCapabilityIssue, resolvePiRuntimeCommand } from "../piRuntime.ts";
 import { normalizePiActiveTranscript } from "../piTranscript.ts";
 
@@ -435,6 +442,7 @@ const CONFIRM_NO = "No";
 export interface PiAdapterOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly handshakeTimeout?: Duration.Input;
 }
 
 interface EventBaseInput {
@@ -464,6 +472,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     const sessions = new Map<ThreadId, PiSessionContext>();
     const resumeSessionIds = new Map<ThreadId, ReadonlyMap<string, string>>();
     const sessionOwnershipLock = yield* Semaphore.make(1);
+    const handshakeTimeout = options?.handshakeTimeout ?? Duration.seconds(60);
 
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
       Effect.mapError(
@@ -500,6 +509,30 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     const emit = (event: ProviderRuntimeEvent) =>
       Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
 
+    const resolvePendingUiRequests = (context: PiSessionContext) =>
+      Effect.gen(function* () {
+        const requestIds = [...context.pendingUiRequests.keys()];
+        context.pendingUiRequests.clear();
+        yield* Effect.forEach(
+          requestIds,
+          (requestId) =>
+            buildEventBase({
+              threadId: context.session.threadId,
+              turnId: context.activeTurnId,
+              requestId,
+            }).pipe(
+              Effect.flatMap((base) =>
+                emit({
+                  ...base,
+                  type: "user-input.resolved",
+                  payload: { answers: {} },
+                }),
+              ),
+            ),
+          { discard: true },
+        );
+      });
+
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
@@ -516,6 +549,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         if (yield* Ref.getAndSet(context.stopped, true)) {
           return;
         }
+        yield* resolvePendingUiRequests(context);
         sessions.delete(context.session.threadId);
         resumeSessionIds.delete(context.session.threadId);
         yield* context.rpc.terminate.pipe(
@@ -957,6 +991,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           return;
         }
         const turnId = context.activeTurnId;
+        yield* resolvePendingUiRequests(context);
         sessions.delete(context.session.threadId);
         resumeSessionIds.delete(context.session.threadId);
         yield* context.rpc.terminate.pipe(Effect.ignore);
@@ -1083,8 +1118,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
 
             const cwd = input.cwd ?? serverConfig.cwd;
             const sessionScope = yield* Scope.make();
-            const rpc = yield* Effect.gen(function* () {
-              const process = yield* spawnPiRpc({
+            const handshake = Effect.gen(function* () {
+              const rpc = yield* spawnPiRpc({
                 binaryPath: rpcRuntime.binaryPath,
                 args: [...rpcRuntime.argsPrefix, "--session-id", piSessionId],
                 cwd,
@@ -1094,8 +1129,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 Scope.provide(sessionScope),
                 Effect.mapError((cause) => rpcError("startSession", cause)),
               );
-              const capabilities = yield* process
-                .request({ type: "get_capabilities" })
+              const capabilities = yield* rpc
+                .request({ type: "get_capabilities" }, { timeout: null })
                 .pipe(Effect.mapError((cause) => rpcError("get_capabilities", cause)));
               const capabilityIssue = piRpcCapabilityIssue(capabilities);
               if (capabilityIssue !== undefined) {
@@ -1105,41 +1140,55 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                   detail: `Incompatible pi RPC runtime: ${capabilityIssue}.`,
                 });
               }
-              return process;
-            }).pipe(Effect.onError(() => Scope.close(sessionScope, Exit.void)));
 
-            const createdAt = yield* nowIso;
-            const context: PiSessionContext = {
-              session: {
-                provider: PROVIDER,
-                providerInstanceId: boundInstanceId,
-                status: "ready",
-                runtimeMode: input.runtimeMode,
-                cwd,
-                threadId: input.threadId,
-                resumeCursor: makePiResume(piSessionId),
-                createdAt,
-                updatedAt: createdAt,
-              },
-              rpc,
-              sessionScope,
-              stopped: yield* Ref.make(false),
-              mutationLock: yield* Semaphore.make(1),
-              ownershipToken,
-              piSessionId,
-              activeTurnId: undefined,
-              abortRequested: false,
-              assistantItemId: undefined,
-              assistantItemOpened: false,
-              compactionItemId: undefined,
-              model: undefined,
-              thinkingLevel: undefined,
-              sessionName: undefined,
-              pendingUiRequests: new Map(),
-            };
+              const createdAt = yield* nowIso;
+              const context: PiSessionContext = {
+                session: {
+                  provider: PROVIDER,
+                  providerInstanceId: boundInstanceId,
+                  status: "ready",
+                  runtimeMode: input.runtimeMode,
+                  cwd,
+                  threadId: input.threadId,
+                  resumeCursor: makePiResume(piSessionId),
+                  createdAt,
+                  updatedAt: createdAt,
+                },
+                rpc,
+                sessionScope,
+                stopped: yield* Ref.make(false),
+                mutationLock: yield* Semaphore.make(1),
+                ownershipToken,
+                piSessionId,
+                activeTurnId: undefined,
+                abortRequested: false,
+                assistantItemId: undefined,
+                assistantItemOpened: false,
+                compactionItemId: undefined,
+                model: undefined,
+                thinkingLevel: undefined,
+                sessionName: undefined,
+                pendingUiRequests: new Map(),
+              };
+
+              const initialState = yield* getPiSessionState(context, { timeout: null });
+              return { context, initialState };
+            }).pipe(
+              Effect.timeoutOrElse({
+                duration: handshakeTimeout,
+                orElse: () =>
+                  Effect.fail(
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "startSession",
+                      detail: "Timed out starting the pi RPC session.",
+                    }),
+                  ),
+              }),
+              Effect.onError(() => Scope.close(sessionScope, Exit.void)),
+            );
+            const { context, initialState } = yield* handshake;
             contextToClose = context;
-
-            const initialState = yield* getPiSessionState(context);
             if (initialState.sessionId !== piSessionId) {
               if (
                 !(yield* Effect.sync(() => claimPiSession(initialState.sessionId, ownershipToken)))
@@ -1160,12 +1209,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
               yield* applyModelSelection(context, input.modelSelection);
             }
 
-            yield* rpc.events.pipe(
+            yield* context.rpc.events.pipe(
               Stream.runForEach((record) => handlePiEventSafely(context, record)),
               Effect.ignore,
               Effect.forkIn(sessionScope),
             );
-            yield* rpc.awaitExit.pipe(
+            yield* context.rpc.awaitExit.pipe(
               Effect.flatMap((code) => emitUnexpectedExit(context, code)),
               Effect.ignore,
               Effect.forkIn(sessionScope),
@@ -1223,8 +1272,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           Effect.gen(function* () {
             yield* applyModelSelection(context, input.modelSelection);
 
-            const turnId = TurnId.make(yield* randomUUIDv4);
             const streaming = context.session.status === "running";
+            const previousActiveTurnId = context.activeTurnId;
+            const turnId =
+              streaming && previousActiveTurnId !== undefined
+                ? previousActiveTurnId
+                : TurnId.make(yield* randomUUIDv4);
             const images =
               input.attachments !== undefined && input.attachments.length > 0
                 ? yield* attachmentImages(input.attachments)
@@ -1232,16 +1285,21 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
 
             context.activeTurnId = turnId;
             yield* context.rpc
-              .request({
-                type: "prompt",
-                message: input.input ?? "",
-                ...(images !== undefined ? { images } : {}),
-                ...(streaming ? { streamingBehavior: "steer" } : {}),
-              })
+              .request(
+                {
+                  type: "prompt",
+                  message: input.input ?? "",
+                  ...(images !== undefined ? { images } : {}),
+                  ...(streaming ? { streamingBehavior: "steer" } : {}),
+                },
+                { timeout: null },
+              )
               .pipe(
                 Effect.tapError(() =>
                   Effect.sync(() => {
-                    if (context.activeTurnId === turnId) context.activeTurnId = undefined;
+                    if (!streaming && context.activeTurnId === turnId) {
+                      context.activeTurnId = undefined;
+                    }
                   }),
                 ),
                 Effect.mapError((cause) => rpcError("prompt", cause)),
@@ -1331,6 +1389,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         if (context === undefined) {
           return;
         }
+        yield* resolvePendingUiRequests(context);
         yield* emit({
           ...(yield* buildEventBase({ threadId })),
           type: "session.exited",
@@ -1404,8 +1463,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         return yield* readThread(threadId);
       });
 
-    const getPiSessionState = (context: PiSessionContext) =>
-      context.rpc.request({ type: "get_state" }).pipe(
+    const getPiSessionState = (context: PiSessionContext, options?: PiRpcRequestOptions) =>
+      context.rpc.request({ type: "get_state" }, options).pipe(
         Effect.flatMap((response) =>
           Schema.decodeUnknownEffect(PiNativeSessionState)(response.data),
         ),
@@ -1488,18 +1547,21 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             });
           }
           const response = yield* context.rpc
-            .request({
-              type: "navigate_tree",
-              targetId: input.targetId,
-              ...(input.summarize !== undefined ? { summarize: input.summarize } : {}),
-              ...(input.customInstructions !== undefined
-                ? { customInstructions: input.customInstructions }
-                : {}),
-              ...(input.replaceInstructions !== undefined
-                ? { replaceInstructions: input.replaceInstructions }
-                : {}),
-              ...(input.label !== undefined ? { label: input.label } : {}),
-            })
+            .request(
+              {
+                type: "navigate_tree",
+                targetId: input.targetId,
+                ...(input.summarize !== undefined ? { summarize: input.summarize } : {}),
+                ...(input.customInstructions !== undefined
+                  ? { customInstructions: input.customInstructions }
+                  : {}),
+                ...(input.replaceInstructions !== undefined
+                  ? { replaceInstructions: input.replaceInstructions }
+                  : {}),
+                ...(input.label !== undefined ? { label: input.label } : {}),
+              },
+              input.summarize === true ? { timeout: null } : undefined,
+            )
             .pipe(Effect.mapError((cause) => rpcError("navigate_tree", cause)));
           return yield* Schema.decodeUnknownEffect(PiNativeNavigateTreeResult)(response.data).pipe(
             Effect.mapError((cause) => rpcError("navigate_tree", cause)),
@@ -1558,12 +1620,15 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     ) =>
       requireContext(input.threadId).pipe(
         Effect.flatMap((context) =>
-          context.rpc.request({
-            type: "compact",
-            ...(input.customInstructions !== undefined
-              ? { customInstructions: input.customInstructions }
-              : {}),
-          }),
+          context.rpc.request(
+            {
+              type: "compact",
+              ...(input.customInstructions !== undefined
+                ? { customInstructions: input.customInstructions }
+                : {}),
+            },
+            { timeout: null },
+          ),
         ),
         Effect.flatMap((response) =>
           Schema.decodeUnknownEffect(PiNativeCompactResult)(response.data),

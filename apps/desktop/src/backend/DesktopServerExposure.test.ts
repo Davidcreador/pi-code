@@ -240,6 +240,35 @@ describe("DesktopServerExposure", () => {
     ),
   );
 
+  it.effect("reconciles concurrent network and Tailscale settings changes", () =>
+    withHarness(
+      lanNetworkInterfaces,
+      Effect.gen(function* () {
+        const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+
+        yield* settings.load;
+        yield* serverExposure.configureFromSettings({ port: 4173 });
+        yield* Effect.all(
+          [
+            serverExposure.setMode("network-accessible"),
+            serverExposure.setTailscaleServeEnabled({ enabled: true, port: 8443 }),
+          ],
+          { concurrency: "unbounded" },
+        );
+
+        const persisted = yield* settings.get;
+        const runtime = yield* serverExposure.getState;
+        assert.equal(persisted.serverExposureMode, "network-accessible");
+        assert.equal(persisted.tailscaleServeEnabled, true);
+        assert.equal(persisted.tailscaleServePort, 8443);
+        assert.equal(runtime.mode, "network-accessible");
+        assert.equal(runtime.tailscaleServeEnabled, true);
+        assert.equal(runtime.tailscaleServePort, 8443);
+      }),
+    ),
+  );
+
   it.effect("preserves persistence request context and the settings failure chain", () => {
     const diskFailure = new Error("disk exploded");
     const settingsFailure = new DesktopAppSettings.DesktopSettingsWriteError({

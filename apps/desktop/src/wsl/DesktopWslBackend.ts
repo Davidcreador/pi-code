@@ -43,7 +43,9 @@ import * as DesktopWslEnvironment from "./DesktopWslEnvironment.ts";
 // divergence if one ever gets renamed.
 export const WSL_INSTANCE_ID_PREFIX = "wsl:";
 const WSL_DEFAULT_DISTRO_ID = `${WSL_INSTANCE_ID_PREFIX}default`;
+const MIN_WSL_PORT = 1_024;
 const MAX_TCP_PORT = 65_535;
+const WSL_PORT_RANGE_SIZE = MAX_TCP_PORT - MIN_WSL_PORT + 1;
 
 export class DesktopWslBackend extends Context.Service<
   DesktopWslBackend,
@@ -77,17 +79,21 @@ const buildLabel = (distro: string | null): string =>
 // Loopback-only port scan starting one above the primary's port. The
 // WSL backend is reachable via 127.0.0.1 from Windows (wslhost
 // auto-forwards), so we only need to verify the IPv4 loopback can bind.
-const scanForWslPort = Effect.fn("desktop.wslBackend.scanForWslPort")(function* (
+export const scanForWslPort = Effect.fn("desktop.wslBackend.scanForWslPort")(function* (
   startPort: number,
+  primaryPort: number,
 ): Effect.fn.Return<number, NetService.NetError, NetService.NetService> {
   const net = yield* NetService.NetService;
-  for (let port = startPort; port <= MAX_TCP_PORT; port += 1) {
-    if (yield* net.canListenOnHost(port, "127.0.0.1")) {
+  const normalizedStart =
+    startPort < MIN_WSL_PORT || startPort > MAX_TCP_PORT ? MIN_WSL_PORT : startPort;
+  for (let offset = 0; offset < WSL_PORT_RANGE_SIZE; offset += 1) {
+    const port = MIN_WSL_PORT + ((normalizedStart - MIN_WSL_PORT + offset) % WSL_PORT_RANGE_SIZE);
+    if (port !== primaryPort && (yield* net.canListenOnHost(port, "127.0.0.1"))) {
       return port;
     }
   }
   return yield* new NetService.NetError({
-    message: `No loopback port available for WSL backend between ${startPort} and ${MAX_TCP_PORT}.`,
+    message: `No loopback port is available for the WSL backend between ${MIN_WSL_PORT} and ${MAX_TCP_PORT}.`,
   });
 });
 
@@ -136,25 +142,30 @@ export const layer = Layer.effect(
       readonly distro: string | null;
     }) {
       const primaryConfig = yield* serverExposure.backendConfig;
-      const port = yield* scanForWslPort(primaryConfig.port + 1).pipe(
-        Effect.provideService(NetService.NetService, net),
-        Effect.map((value) => Option.some(value)),
-        Effect.catch((error) =>
-          logWslBackendWarning("could not allocate port for WSL backend", {
-            error: error.message,
-          }).pipe(Effect.as(Option.none<number>())),
-        ),
-      );
-
-      if (Option.isNone(port)) {
-        return;
-      }
-      const allocatedPort = port.value;
+      const firstWslPort =
+        primaryConfig.port >= MAX_TCP_PORT
+          ? MIN_WSL_PORT
+          : Math.max(MIN_WSL_PORT, primaryConfig.port + 1);
+      const nextPortRef = yield* Ref.make(firstWslPort);
+      const configResolve = Effect.gen(function* () {
+        const startPort = yield* Ref.get(nextPortRef);
+        const allocatedPort = yield* scanForWslPort(startPort, primaryConfig.port).pipe(
+          Effect.provideService(NetService.NetService, net),
+        );
+        yield* Ref.set(
+          nextPortRef,
+          allocatedPort === MAX_TCP_PORT ? MIN_WSL_PORT : allocatedPort + 1,
+        );
+        yield* logWslBackendInfo("allocated WSL backend port", {
+          port: allocatedPort,
+          distro: input.distro ?? null,
+        });
+        return yield* configuration.resolveWsl({ port: allocatedPort, distro: input.distro });
+      });
 
       const targetId = resolveTargetInstanceId(input.distro);
       yield* logWslBackendInfo("registering WSL backend with pool", {
         id: targetId,
-        port: allocatedPort,
         distro: input.distro ?? null,
       });
 
@@ -162,7 +173,7 @@ export const layer = Layer.effect(
         .register({
           id: targetId,
           label: Effect.succeed(buildLabel(input.distro)),
-          configResolve: configuration.resolveWsl({ port: allocatedPort, distro: input.distro }),
+          configResolve,
           // Dual-mode secondary: record a fatal preflight failure so Connections
           // settings can show why the WSL backend never appeared. No dialog or
           // fallback — Windows is the primary and keeps working.

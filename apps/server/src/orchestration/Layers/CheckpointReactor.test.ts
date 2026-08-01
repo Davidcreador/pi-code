@@ -35,7 +35,7 @@ import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
-import { CheckpointReactorLive } from "./CheckpointReactor.ts";
+import { checkpointRefsBeyondLimit, CheckpointReactorLive } from "./CheckpointReactor.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -49,11 +49,12 @@ import {
 } from "../Services/OrchestrationEngine.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
-import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
+import { checkpointRefForThreadTurn, MAX_THREAD_CHECKPOINTS } from "../../checkpointing/Utils.ts";
 import { ServerConfig } from "../../config.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
@@ -79,12 +80,12 @@ function createProviderServiceHarness(
   hasSession = true,
   sessionCwd = cwd,
   providerName: ProviderSession["provider"] = ProviderDriverKind.make("codex"),
+  rollbackConversationImplementation: ProviderServiceShape["rollbackConversation"] = () =>
+    Effect.void,
 ) {
   const now = "2026-01-01T00:00:00.000Z";
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
-  const rollbackConversation = vi.fn(
-    (_input: { readonly threadId: ThreadId; readonly numTurns: number }) => Effect.void,
-  );
+  const rollbackConversation = vi.fn(rollbackConversationImplementation);
 
   const unsupported = <A>() =>
     Effect.die(new Error("Unsupported provider call in test")) as Effect.Effect<A, never>;
@@ -276,6 +277,37 @@ async function waitForGitRefExists(cwd: string, ref: string, timeoutMs = 15_000)
 }
 
 describe("CheckpointReactor", () => {
+  it("identifies checkpoint refs that fall beyond the read-model cap", () => {
+    const threadId = ThreadId.make("thread-checkpoint-pruning");
+    const checkpoints = Array.from({ length: MAX_THREAD_CHECKPOINTS }, (_, index) => {
+      const turnCount = index + 1;
+      return {
+        turnId: TurnId.make(`turn-${turnCount}`),
+        checkpointTurnCount: turnCount,
+        checkpointRef: checkpointRefForThreadTurn(threadId, turnCount),
+        status: "ready" as const,
+        files: [],
+        assistantMessageId: null,
+        completedAt: "2026-01-01T00:00:00.000Z",
+      };
+    });
+
+    expect(
+      checkpointRefsBeyondLimit(checkpoints, {
+        turnId: TurnId.make(`turn-${MAX_THREAD_CHECKPOINTS + 1}`),
+        checkpointTurnCount: MAX_THREAD_CHECKPOINTS + 1,
+        checkpointRef: checkpointRefForThreadTurn(threadId, MAX_THREAD_CHECKPOINTS + 1),
+      }),
+    ).toEqual([checkpointRefForThreadTurn(threadId, 1)]);
+    expect(
+      checkpointRefsBeyondLimit(checkpoints, {
+        turnId: TurnId.make("replacement-turn"),
+        checkpointTurnCount: MAX_THREAD_CHECKPOINTS,
+        checkpointRef: checkpointRefForThreadTurn(threadId, MAX_THREAD_CHECKPOINTS),
+      }),
+    ).toEqual([]);
+  });
+
   let runtime: ManagedRuntime.ManagedRuntime<
     | OrchestrationEngineService
     | CheckpointReactor
@@ -311,6 +343,7 @@ describe("CheckpointReactor", () => {
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
+    readonly rollbackConversation?: ProviderServiceShape["rollbackConversation"];
   }) {
     const cwd = createGitRepository();
     tempDirs.push(cwd);
@@ -319,6 +352,7 @@ describe("CheckpointReactor", () => {
       options?.hasSession ?? true,
       options?.providerSessionCwd ?? cwd,
       options?.providerName ?? ProviderDriverKind.make("codex"),
+      options?.rollbackConversation,
     );
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
@@ -359,6 +393,7 @@ describe("CheckpointReactor", () => {
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(RuntimeReceiptBusLive),
+      Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
       Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
@@ -766,6 +801,69 @@ describe("CheckpointReactor", () => {
     ).toBe("v1\n");
   });
 
+  it("appends a failure activity when pre-turn baseline capture fails", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const checkpointRefsPath = NodePath.join(harness.cwd, ".git", "refs", "t3");
+    NodeFS.mkdirSync(checkpointRefsPath, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(checkpointRefsPath, "checkpoints"), "blocked\n", "utf8");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-baseline-capture-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("message-baseline-capture-failure"),
+          role: "user",
+          text: "start turn",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
+    );
+
+    expect(
+      thread.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
+    ).toBe(true);
+    expect(
+      gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0)),
+    ).toBe(false);
+  });
+
+  it("reports checkpoint unavailability once for a non-repository workspace", async () => {
+    const nonRepository = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "checkpoint-no-git-"));
+    tempDirs.push(nonRepository);
+    const harness = await createHarness({
+      hasSession: false,
+      seedFilesystemCheckpoints: false,
+      threadWorktreePath: nonRepository,
+    });
+
+    for (const index of [1, 2]) {
+      harness.provider.emit({
+        type: "turn.started",
+        eventId: EventId.make(`evt-non-git-turn-${index}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: `2026-01-01T00:00:0${index}.000Z`,
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId(`turn-${index}`),
+      });
+    }
+    await harness.drain();
+
+    const snapshot = await harness.readModel();
+    const unavailableActivities = snapshot.threads[0]?.activities.filter(
+      (activity) => activity.kind === "checkpoint.unavailable",
+    );
+    expect(unavailableActivities).toHaveLength(1);
+  });
+
   it("captures turn completion checkpoint from project workspace root when provider session cwd is unavailable", async () => {
     const harness = await createHarness({
       hasSession: false,
@@ -1150,6 +1248,122 @@ describe("CheckpointReactor", () => {
       threadId: ThreadId.make("thread-1"),
       numTurns: 1,
     });
+  });
+
+  it("leaves the filesystem untouched when provider rollback fails", async () => {
+    const harness = await createHarness({
+      rollbackConversation: () =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "pi",
+            method: "rollbackConversation",
+            detail: "rollback failed",
+          }),
+        ),
+    });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    for (const turnCount of [1, 2]) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make(`cmd-diff-rollback-failure-${turnCount}`),
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId(`turn-${turnCount}`),
+          completedAt: createdAt,
+          checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), turnCount),
+          status: "ready",
+          files: [],
+          checkpointTurnCount: turnCount,
+          createdAt,
+        }),
+      );
+    }
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "untracked.txt"), "keep me\n", "utf8");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.checkpoint.revert",
+        commandId: CommandId.make("cmd-revert-provider-rollback-failure"),
+        threadId: ThreadId.make("thread-1"),
+        turnCount: 1,
+        createdAt,
+      }),
+    );
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "checkpoint.revert.failed"),
+    );
+
+    expect(thread.activities.some((activity) => activity.kind === "checkpoint.revert.failed")).toBe(
+      true,
+    );
+    expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "untracked.txt"), "utf8")).toBe(
+      "keep me\n",
+    );
+    expect(
+      gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2)),
+    ).toBe(true);
+  });
+
+  it("refuses turn-zero revert when the baseline ref is missing without changing dirty work", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-diff-missing-turn-zero-baseline"),
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-1"),
+        completedAt: createdAt,
+        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
+        status: "ready",
+        files: [],
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+
+    runGit(harness.cwd, [
+      "update-ref",
+      "-d",
+      checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+    ]);
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "dirty tracked work\n", "utf8");
+    NodeFS.writeFileSync(
+      NodePath.join(harness.cwd, "untracked.txt"),
+      "dirty untracked work\n",
+      "utf8",
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.checkpoint.revert",
+        commandId: CommandId.make("cmd-revert-missing-turn-zero-baseline"),
+        threadId: ThreadId.make("thread-1"),
+        turnCount: 0,
+        createdAt,
+      }),
+    );
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "checkpoint.revert.failed"),
+    );
+
+    expect(thread.activities.some((activity) => activity.kind === "checkpoint.revert.failed")).toBe(
+      true,
+    );
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe(
+      "dirty tracked work\n",
+    );
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "untracked.txt"), "utf8")).toBe(
+      "dirty untracked work\n",
+    );
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
   });
 
   it("appends an error activity when revert is requested without an active session", async () => {

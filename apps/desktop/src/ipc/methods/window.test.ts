@@ -42,6 +42,7 @@ const defaultWslInstance: DesktopBackendManager.DesktopBackendInstance = {
   currentConfig: Effect.succeed(Option.some(readyWslConfig)),
   snapshot: Effect.succeed({
     desiredRunning: true,
+    startInProgress: false,
     ready: true,
     activePid: Option.some(123),
     restartAttempt: 0,
@@ -82,6 +83,7 @@ describe("getLocalEnvironmentBootstraps", () => {
       currentConfig: Effect.succeed(Option.some(retryingConfig)),
       snapshot: Effect.succeed({
         desiredRunning: true,
+        startInProgress: false,
         ready: false,
         activePid: Option.none(),
         restartAttempt: 2,
@@ -103,6 +105,43 @@ describe("getLocalEnvironmentBootstraps", () => {
     }).pipe(Effect.provide(DesktopBackendPool.layerTest([retryingInstance])));
   });
 
+  it.effect("keeps a bounded transient bootstrap pending while a retry starts", () => {
+    const startingInstance: DesktopBackendManager.DesktopBackendInstance = {
+      ...defaultWslInstance,
+      currentConfig: Effect.succeed(
+        Option.some({
+          ...readyWslConfig,
+          preflightFailure: Option.some({
+            reason: "WSL probe timed out",
+            fatal: false,
+            retryLimit: 12,
+          }),
+        }),
+      ),
+      snapshot: Effect.succeed({
+        desiredRunning: false,
+        startInProgress: true,
+        ready: false,
+        activePid: Option.none(),
+        restartAttempt: 3,
+        restartScheduled: false,
+      }),
+    };
+
+    return Effect.gen(function* () {
+      const result = yield* getLocalEnvironmentBootstraps.handler();
+      assert.deepEqual(result, [
+        {
+          id: "wsl:default",
+          label: "WSL (default distro)",
+          runningDistro: null,
+          httpBaseUrl: null,
+          wsBaseUrl: null,
+        },
+      ]);
+    }).pipe(Effect.provide(DesktopBackendPool.layerTest([startingInstance])));
+  });
+
   it.effect("omits a bounded transient bootstrap after retries stop", () => {
     const stoppedInstance: DesktopBackendManager.DesktopBackendInstance = {
       ...defaultWslInstance,
@@ -118,6 +157,7 @@ describe("getLocalEnvironmentBootstraps", () => {
       ),
       snapshot: Effect.succeed({
         desiredRunning: false,
+        startInProgress: false,
         ready: false,
         activePid: Option.none(),
         restartAttempt: 12,

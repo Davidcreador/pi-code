@@ -133,6 +133,12 @@ describe("DesktopBackendConfiguration", () => {
 
         assert.equal(first.executablePath, process.execPath);
         assert.equal(first.entryPath, environment.backendEntryPath);
+        assert.deepEqual(first.args, [
+          environment.backendEntryPath,
+          "--bootstrap-fd",
+          "3",
+          "--desktop-parent-liveness",
+        ]);
         assert.equal(first.cwd, environment.backendCwd);
         assert.equal(first.captureOutput, true);
         assert.equal(first.env.ELECTRON_RUN_AS_NODE, "1");
@@ -148,6 +154,7 @@ describe("DesktopBackendConfiguration", () => {
         assert.equal(first.bootstrap.tailscaleServeEnabled, true);
         assert.equal(first.bootstrap.tailscaleServePort, 8443);
         assert.match(first.bootstrap.desktopBootstrapToken, /^[0-9a-f]{48}$/i);
+        assert.equal(first.bootstrap.desktopParentPid, process.pid);
         assert.equal(second.bootstrap.desktopBootstrapToken, first.bootstrap.desktopBootstrapToken);
       }),
     ),
@@ -283,6 +290,7 @@ describe("DesktopBackendConfiguration", () => {
           linuxEntryPath,
           "--bootstrap-fd",
           "0",
+          "--desktop-parent-liveness",
           "--dev-url",
           devServerUrl,
         ]);

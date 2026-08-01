@@ -26,9 +26,9 @@ describe("branding", () => {
       value: {
         desktopBridge: {
           getAppBranding: () => ({
-            baseName: "d4",
+            baseName: "piCode",
             stageLabel: "Nightly",
-            displayName: "d4 (Nightly)",
+            displayName: "piCode (Nightly)",
           }),
         },
       },
@@ -36,9 +36,9 @@ describe("branding", () => {
 
     const branding = await import("./branding");
 
-    expect(branding.APP_BASE_NAME).toBe("d4");
+    expect(branding.APP_BASE_NAME).toBe("piCode");
     expect(branding.APP_STAGE_LABEL).toBe("Nightly");
-    expect(branding.APP_DISPLAY_NAME).toBe("d4 (Nightly)");
+    expect(branding.APP_DISPLAY_NAME).toBe("piCode (Nightly)");
   });
 
   it("normalizes hosted app channel metadata", async () => {
@@ -49,7 +49,7 @@ describe("branding", () => {
     expect(branding.HOSTED_APP_CHANNEL).toBe("nightly");
     expect(branding.HOSTED_APP_CHANNEL_LABEL).toBe("Nightly");
     expect(branding.APP_STAGE_LABEL).toBe("Nightly");
-    expect(branding.APP_DISPLAY_NAME).toBe("d4 (Nightly)");
+    expect(branding.APP_DISPLAY_NAME).toBe("piCode (Nightly)");
   });
 
   it("does not label the latest hosted app channel", async () => {
@@ -60,7 +60,7 @@ describe("branding", () => {
     expect(branding.HOSTED_APP_CHANNEL).toBe("latest");
     expect(branding.HOSTED_APP_CHANNEL_LABEL).toBe("Latest");
     expect(branding.APP_STAGE_LABEL).toBe("Latest");
-    expect(branding.APP_DISPLAY_NAME).toBe("d4");
+    expect(branding.APP_DISPLAY_NAME).toBe("piCode");
   });
 
   it("ignores unknown hosted app channels", async () => {
@@ -86,34 +86,34 @@ describe("branding logic", () => {
   it("updates the display name for nightly primary server versions", () => {
     expect(
       resolveServerBackedAppDisplayName({
-        baseName: "d4",
-        fallbackDisplayName: "d4 (Alpha)",
+        baseName: "piCode",
+        fallbackDisplayName: "piCode (Alpha)",
         fallbackStageLabel: "Alpha",
         primaryServerVersion: "0.0.28-nightly.20260616.12",
       }),
-    ).toBe("d4 (Nightly)");
+    ).toBe("piCode (Nightly)");
   });
 
   it("keeps the fallback display name for stable primary server versions", () => {
     expect(
       resolveServerBackedAppDisplayName({
-        baseName: "d4",
-        fallbackDisplayName: "d4 (Alpha)",
+        baseName: "piCode",
+        fallbackDisplayName: "piCode (Alpha)",
         fallbackStageLabel: "Alpha",
         primaryServerVersion: "0.0.27",
       }),
-    ).toBe("d4 (Alpha)");
+    ).toBe("piCode (Alpha)");
   });
 
   it("keeps the fallback display name for malformed nightly primary server versions", () => {
     expect(
       resolveServerBackedAppDisplayName({
-        baseName: "d4",
-        fallbackDisplayName: "d4 (Alpha)",
+        baseName: "piCode",
+        fallbackDisplayName: "piCode (Alpha)",
         fallbackStageLabel: "Alpha",
         primaryServerVersion: "0.0.28-nightly.20260616",
       }),
-    ).toBe("d4 (Alpha)");
+    ).toBe("piCode (Alpha)");
   });
 });
 

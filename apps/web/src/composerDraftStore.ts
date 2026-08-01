@@ -2856,6 +2856,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           const threadKey = resolveComposerDraftKey(get(), threadRef);
           const threadId = resolveComposerThreadId(get(), threadRef);
           if (!threadKey || !threadId) {
+            revokeObjectPreviewUrl(image.previewUrl);
             return;
           }
           get().addImages(typeof threadRef === "string" ? DraftId.make(threadKey) : threadRef, [
@@ -2864,7 +2865,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
         },
         addImages: (threadRef, images) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
-          if (threadKey.length === 0 || images.length === 0) {
+          if (images.length === 0) return;
+          if (threadKey.length === 0) {
+            for (const image of images) revokeObjectPreviewUrl(image.previewUrl);
             return;
           }
           set((state) => {

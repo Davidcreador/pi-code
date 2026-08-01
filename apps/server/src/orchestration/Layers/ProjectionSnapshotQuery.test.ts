@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { MAX_THREAD_CHECKPOINTS } from "../../checkpointing/Utils.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
@@ -1547,6 +1548,79 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
       assert.equal(shellSnapshot.projects.length, 0);
       assert.equal(shellSnapshot.threads.length, 0);
+    }),
+  );
+
+  it.effect("caps checkpoint rows per thread to the latest read-model entries", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`DELETE FROM projection_state`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json, scripts_json,
+          created_at, updated_at, deleted_at
+        ) VALUES (
+          'project-checkpoint-cap', 'Checkpoint cap', '/tmp/checkpoint-cap',
+          '{"instanceId":"pi","model":"default"}', '[]',
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, latest_user_message_at,
+          pending_approval_count, pending_user_input_count, has_actionable_proposed_plan,
+          created_at, updated_at, deleted_at
+        ) VALUES (
+          'thread-checkpoint-cap', 'project-checkpoint-cap', 'Checkpoint cap',
+          '{"instanceId":"pi","model":"default"}', 'full-access', 'default',
+          NULL, NULL, 'turn-501', NULL, 0, 0, 0,
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        WITH RECURSIVE checkpoint_counts(turn_count) AS (
+          SELECT 1
+          UNION ALL
+          SELECT turn_count + 1
+          FROM checkpoint_counts
+          WHERE turn_count < ${MAX_THREAD_CHECKPOINTS + 1}
+        )
+        INSERT INTO projection_turns (
+          thread_id, turn_id, pending_message_id, source_proposed_plan_thread_id,
+          source_proposed_plan_id, assistant_message_id, state, requested_at, started_at,
+          completed_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status,
+          checkpoint_files_json
+        )
+        SELECT
+          'thread-checkpoint-cap', printf('turn-%d', turn_count), NULL, NULL, NULL, NULL,
+          'completed', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+          '2026-01-01T00:00:00.000Z', turn_count, printf('refs/test/%d', turn_count),
+          'ready', '[]'
+        FROM checkpoint_counts
+      `;
+
+      const context = yield* snapshotQuery.getThreadCheckpointContext(
+        ThreadId.make("thread-checkpoint-cap"),
+      );
+      assert.equal(context._tag, "Some");
+      if (context._tag === "Some") {
+        assert.equal(context.value.checkpoints.length, MAX_THREAD_CHECKPOINTS);
+        assert.equal(context.value.checkpoints[0]?.checkpointTurnCount, 2);
+        assert.equal(
+          context.value.checkpoints.at(-1)?.checkpointTurnCount,
+          MAX_THREAD_CHECKPOINTS + 1,
+        );
+      }
+
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      assert.equal(snapshot.threads[0]?.checkpoints.length, MAX_THREAD_CHECKPOINTS);
+      assert.equal(snapshot.threads[0]?.checkpoints[0]?.checkpointTurnCount, 2);
     }),
   );
 });

@@ -41,10 +41,15 @@ export interface DiffCheckpointsInput {
   readonly ignoreWhitespace: boolean;
 }
 
-export interface DeleteCheckpointRefsInput {
-  readonly cwd: string;
-  readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
-}
+export type DeleteCheckpointRefsInput =
+  | {
+      readonly cwd: string;
+      readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
+    }
+  | {
+      readonly cwd: string;
+      readonly checkpointRefPrefix: string;
+    };
 
 /** Service tag for checkpoint persistence and restore operations. */
 export class CheckpointStore extends Context.Service<
@@ -86,7 +91,7 @@ export class CheckpointStore extends Context.Service<
     ) => Effect.Effect<string, CheckpointStoreError>;
 
     /**
-     * Delete the provided checkpoint refs.
+     * Delete checkpoint refs explicitly or by namespace prefix.
      *
      * Best-effort delete: missing refs are tolerated.
      */
@@ -115,9 +120,7 @@ export const make = Effect.gen(function* () {
   });
 
   const isGitRepository: CheckpointStore["Service"]["isGitRepository"] = (cwd) =>
-    vcsRegistry
-      .detect({ cwd, requestedKind: "git" })
-      .pipe(Effect.map((repository) => repository !== null));
+    vcsRegistry.get("git").pipe(Effect.flatMap((driver) => driver.isInsideWorkTree(cwd)));
 
   const captureCheckpoint: CheckpointStore["Service"]["captureCheckpoint"] = Effect.fn(
     "captureCheckpoint",

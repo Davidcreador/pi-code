@@ -31,7 +31,6 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { reconcilePiTranscriptPreservingPendingUserMessage } from "../../provider/piTreeNavigation.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
-import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -1012,11 +1011,7 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const bufferedText = yield* takeBufferedAssistantText(input.messageId);
       const text =
-        bufferedText.length > 0
-          ? bufferedText
-          : (input.fallbackText?.trim().length ?? 0) > 0
-            ? input.fallbackText!
-            : "";
+        (input.fallbackText?.trim().length ?? 0) > 0 ? input.fallbackText! : bufferedText;
       const hasRenderableText = hasRenderableAssistantText(text);
 
       if (hasRenderableText) {
@@ -1746,9 +1741,7 @@ const make = Effect.gen(function* () {
               .getThreadCheckpointContext(thread.id)
               .pipe(Effect.map(Option.getOrUndefined))
           : undefined;
-        const workspaceCwd =
-          checkpointContext?.worktreePath ?? checkpointContext?.workspaceRoot ?? undefined;
-        if (turnId && checkpointContext && workspaceCwd && isGitRepository(workspaceCwd)) {
+        if (turnId && checkpointContext) {
           // Skip if a checkpoint already exists for this turn. A real
           // (non-placeholder) capture from CheckpointReactor should not
           // be clobbered, and dispatching a duplicate placeholder for the

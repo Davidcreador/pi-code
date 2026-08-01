@@ -1072,6 +1072,50 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("trusts assistant item completion detail over buffered deltas", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-assistant-partial-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-authoritative-completion"),
+      itemId: asItemId("item-authoritative-completion"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "partial text",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-assistant-authoritative-completion"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-authoritative-completion"),
+      itemId: asItemId("item-authoritative-completion"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        detail: "authoritative final text",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-authoritative-completion" && !message.streaming,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-authoritative-completion",
+    );
+    expect(message?.text).toBe("authoritative final text");
+  });
+
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -1611,6 +1655,74 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(targetThreadAfterRejectedStart?.session?.status).toBe("running");
     expect(targetThreadAfterRejectedStart?.session?.activeTurnId).toBe(activeTurnId);
+  });
+
+  it("settles a steered pi turn when completion keeps the original active turn id", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const activeTurnId = asTurnId("turn-pi-steered");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("pi"),
+      status: "running",
+      runtimeMode: "full-access",
+      threadId,
+      createdAt,
+      updatedAt: createdAt,
+      activeTurnId,
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-pi-steered"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt,
+      threadId,
+      turnId: activeTurnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session?.activeTurnId === activeTurnId,
+      2_000,
+      threadId,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-pi-steer"),
+        threadId,
+        message: {
+          messageId: asMessageId("msg-pi-steer"),
+          role: "user",
+          text: "finish with the updated direction",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-pi-steered"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId,
+      turnId: activeTurnId,
+      status: "completed",
+    });
+
+    const settledThread = await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "ready" && thread.session?.activeTurnId === null,
+      2_000,
+      threadId,
+    );
+    expect(settledThread.session?.status).toBe("ready");
+    expect(settledThread.session?.activeTurnId).toBeNull();
   });
 
   it("accepts a conflicting turn.started for a pending turn start when the provider expects that turn", async () => {
@@ -3561,6 +3673,117 @@ describe("ProviderRuntimeIngestion", () => {
     expect(resolvedPayload?.answers).toEqual({
       sandbox_mode: "workspace-write",
     });
+  });
+
+  it("clears crashed Pi user input so the stopped thread can settle and snooze", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-pi-crashed-input");
+    const requestId = ApprovalRequestId.make("req-pi-crashed-input");
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-pi-crashed-input"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: now,
+      threadId,
+      turnId,
+    });
+    harness.emit({
+      type: "user-input.requested",
+      eventId: asEventId("evt-user-input-requested-pi-crashed"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: now,
+      threadId,
+      turnId,
+      requestId,
+      payload: {
+        questions: [
+          {
+            id: requestId,
+            header: "Extension",
+            question: "Pick one",
+            options: [{ label: "Allow", description: "Allow" }],
+          },
+        ],
+      },
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.activities.some(
+          (activity: ProviderRuntimeTestActivity) =>
+            activity.id === "evt-user-input-requested-pi-crashed",
+        ),
+    );
+
+    harness.emit({
+      type: "user-input.resolved",
+      eventId: asEventId("evt-user-input-resolved-pi-crashed"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId,
+      requestId,
+      payload: { answers: {} },
+    });
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-pi-crashed-input"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId,
+      turnId,
+      payload: {},
+    });
+
+    const stopped = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "stopped" &&
+        thread.activities.some(
+          (activity: ProviderRuntimeTestActivity) =>
+            activity.id === "evt-user-input-resolved-pi-crashed",
+        ),
+    );
+    const resolution = stopped.activities.find(
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "evt-user-input-resolved-pi-crashed",
+    );
+    expect(resolution?.payload).toMatchObject({ requestId, answers: {} });
+    expect(
+      stopped.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.kind === "provider.user-input.respond.failed",
+      ),
+    ).toBe(false);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("cmd-settle-after-pi-input-crash"),
+        threadId,
+      }),
+    );
+    await waitForThread(harness.readModel, (thread) => thread.settledOverride === "settled");
+
+    const snoozedUntil = "2099-01-01T00:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("cmd-snooze-after-pi-input-crash"),
+        threadId,
+        snoozedUntil,
+      }),
+    );
+    const snoozed = await waitForThread(
+      harness.readModel,
+      (thread) => thread.snoozedUntil === snoozedUntil,
+    );
+    expect(snoozed.settledOverride).toBe("settled");
+    expect(snoozed.snoozedUntil).toBe(snoozedUntil);
   });
 
   it("continues processing runtime events after a single event handler failure", async () => {

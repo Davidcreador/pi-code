@@ -34,6 +34,7 @@ export interface RotatingLogFileWriter {
 }
 
 export interface DesktopBackendOutputLogShape {
+  readonly filePath: string | null;
   readonly beginSession: (input: { readonly details: string }) => Effect.Effect<void>;
   readonly writeOutputChunk: (
     streamName: "stdout" | "stderr",
@@ -129,6 +130,7 @@ const encodeDesktopBackendChildLogRecord = Schema.encodeEffect(
 );
 
 const DesktopBackendOutputLogNoop: DesktopBackendOutputLogShape = {
+  filePath: null,
   beginSession: () => Effect.void,
   writeOutputChunk: () => Effect.void,
   persistFailureSnapshot: () => Effect.void,
@@ -463,6 +465,7 @@ const makeBackendOutputLogShape = (
           },
         );
         return {
+          filePath: backendLogFilePathForInstance(environment, id),
           beginSession: Effect.fn("desktop.observability.backendOutput.beginSession")(function* ({
             details,
           }) {

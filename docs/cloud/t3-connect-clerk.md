@@ -191,7 +191,7 @@ binary from another:
 ```sh
 VITE_DEV_SERVER_URL=http://127.0.0.1:5733 \
 T3CODE_PORT=13773 \
-  "/Applications/d4.app/Contents/MacOS/d4"
+  "/Applications/piCode.app/Contents/MacOS/piCode"
 ```
 
 After changing Associated Domains, bump the build version before rebuilding; macOS may otherwise
@@ -200,8 +200,8 @@ reuse stale Shared Web Credentials metadata for the same app/version pair.
 Verify the installed bundle before testing:
 
 ```sh
-codesign --verify --deep --strict "/Applications/d4.app"
-codesign -d --entitlements :- "/Applications/d4.app"
+codesign --verify --deep --strict "/Applications/piCode.app"
+codesign -d --entitlements :- "/Applications/piCode.app"
 ```
 
 The current mobile UI uses Clerk's native authentication view. If a future mobile browser OAuth

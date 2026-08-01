@@ -13,9 +13,9 @@ const defaultInput = {
   platform: "darwin",
   processArch: "arm64",
   appVersion: "0.0.22",
-  appPath: "/Applications/d4.app/Contents/Resources/app.asar",
+  appPath: "/Applications/piCode.app/Contents/Resources/app.asar",
   isPackaged: false,
-  resourcesPath: "/Applications/d4.app/Contents/Resources",
+  resourcesPath: "/Applications/piCode.app/Contents/Resources",
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
@@ -68,9 +68,9 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
       assert.deepEqual(environment.branding, {
-        baseName: "d4",
+        baseName: "piCode",
         stageLabel: "Dev",
-        displayName: "d4 (Dev)",
+        displayName: "piCode (Dev)",
       });
       assert.equal(environment.appUserModelId, "com.d4.desktop.dev");
       assert.equal(environment.linuxWmClass, "d4-dev");
@@ -99,9 +99,9 @@ describe("DesktopEnvironment", () => {
 
       assert.equal(environment.isDevelopment, false);
       assert.deepEqual(environment.branding, {
-        baseName: "d4",
+        baseName: "piCode",
         stageLabel: "Alpha",
-        displayName: "d4",
+        displayName: "piCode",
       });
       assert.equal(environment.userDataDirName, "d4");
       assert.equal(environment.legacyUserDataDirName, "d4");
@@ -118,7 +118,7 @@ describe("DesktopEnvironment", () => {
         appVersion: "0.0.22-nightly.20260730.1",
       });
 
-      assert.equal(environment.displayName, "d4 (Nightly)");
+      assert.equal(environment.displayName, "piCode (Nightly)");
     }),
   );
 

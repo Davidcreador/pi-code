@@ -17,6 +17,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 import * as ServerConfig from "../../config.ts";
@@ -36,6 +37,25 @@ const decodePiSettings = Schema.decodeSync(PiSettings);
 const settings = decodePiSettings({ binaryPath: fakePiPath });
 
 const layer = NodeServices.layer;
+
+const waitForFileContent = (filePath: string, expected: string) =>
+  Effect.callback<void>((resume) => {
+    let completed = false;
+    const completeIfReady = () => {
+      if (
+        !completed &&
+        NodeFS.existsSync(filePath) &&
+        NodeFS.readFileSync(filePath, "utf8") === expected
+      ) {
+        completed = true;
+        watcher.close();
+        resume(Effect.void);
+      }
+    };
+    const watcher = NodeFS.watch(NodePath.dirname(filePath), completeIfReady);
+    completeIfReady();
+    return Effect.sync(() => watcher.close());
+  });
 
 it.layer(layer)("PiAdapter", (it) => {
   it.effect("translates a pi turn into runtime events", () =>
@@ -507,6 +527,96 @@ it.layer(layer)("PiAdapter", (it) => {
     ),
   );
 
+  it.effect("bounds the whole handshake and releases the ownership lock", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const capabilitiesMarker = NodePath.join(config.baseDir, "capabilities-phase");
+        const stateMarker = NodePath.join(config.baseDir, "state-phase");
+        const sigtermMarker = NodePath.join(config.baseDir, "handshake-sigterm");
+        const pidMarker = NodePath.join(config.baseDir, "handshake-process-pid");
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+          environment: {
+            ...process.env,
+            FAKE_PI_HOLD_CAPABILITIES_MARKER: capabilitiesMarker,
+            FAKE_PI_HOLD_CAPABILITIES_SESSION_ID: "hung-session",
+            FAKE_PI_HANG_STATE_SESSION_ID: "hung-session",
+            FAKE_PI_STATE_MARKER: stateMarker,
+            FAKE_PI_IGNORE_SIGTERM_SESSION_ID: "hung-session",
+            FAKE_PI_SIGTERM_MARKER: sigtermMarker,
+            FAKE_PI_PID_MARKER: pidMarker,
+            FAKE_PI_EXIT_MARKER: NodePath.join(config.baseDir, "normal-process-exited"),
+          },
+          handshakeTimeout: "30 millis",
+        });
+
+        const firstStart = yield* adapter
+          .startSession({
+            threadId: ThreadId.make("97979797-9797-4797-8979-979797979797"),
+            runtimeMode: "full-access",
+            resumeCursor: { schemaVersion: 1, sessionId: "hung-session" },
+          })
+          .pipe(Effect.flip, Effect.forkScoped);
+        yield* waitForFileContent(capabilitiesMarker, "waiting");
+        yield* TestClock.adjust("20 millis");
+        NodeFS.writeFileSync(capabilitiesMarker, "release");
+        yield* waitForFileContent(stateMarker, "waiting");
+        yield* TestClock.adjust("10 millis");
+        yield* waitForFileContent(sigtermMarker, "received");
+        const firstPid = Number(NodeFS.readFileSync(pidMarker, "utf8"));
+        assert.doesNotThrow(() => process.kill(firstPid, 0));
+        yield* TestClock.adjust("5 seconds");
+
+        const firstError = yield* Fiber.join(firstStart);
+        assert.equal(firstError._tag, "ProviderAdapterRequestError");
+        assert.include(firstError.message, "Timed out");
+        assert.throws(() => process.kill(firstPid, 0));
+
+        const session = yield* adapter
+          .startSession({
+            threadId: ThreadId.make("96969696-9696-4696-8969-969696969696"),
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.timeout("10 seconds"));
+        assert.equal(session.status, "ready");
+        yield* adapter.stopAll();
+      }),
+    ).pipe(
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-handshake-test-" }),
+      ),
+    ),
+  );
+
+  it.effect("allows prompt requests to run beyond the control timeout", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const promptMarker = NodePath.join(config.baseDir, "prompt-phase");
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+          environment: { ...process.env, FAKE_PI_HOLD_PROMPT_MARKER: promptMarker },
+        });
+        const threadId = ThreadId.make("95959595-9595-4595-8959-959595959595");
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+
+        const prompt = yield* adapter
+          .sendTurn({ threadId, input: "long prompt" })
+          .pipe(Effect.forkScoped);
+        yield* waitForFileContent(promptMarker, "waiting");
+        yield* TestClock.adjust("61 seconds");
+        NodeFS.writeFileSync(promptMarker, "release");
+
+        const turn = yield* Fiber.join(prompt).pipe(Effect.timeout("10 seconds"));
+        assert.equal(turn.threadId, threadId);
+        yield* adapter.stopAll();
+      }),
+    ).pipe(
+      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-prompt-test-" })),
+    ),
+  );
+
   it.effect("closes the RPC process when capability probing fails", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -539,7 +649,7 @@ it.layer(layer)("PiAdapter", (it) => {
     ),
   );
 
-  it.effect("reports an interrupted turn after abort", () =>
+  it.effect("keeps the active turn id when steering before abort", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const adapter = yield* makePiAdapter(settings, {
@@ -549,22 +659,40 @@ it.layer(layer)("PiAdapter", (it) => {
         );
 
         const threadId = ThreadId.make("22222222-2222-4222-8222-222222222222");
-        const events: Array<{ type: string; payload?: unknown }> = [];
+        const events: Array<{
+          type: string;
+          turnId?: string | undefined;
+          payload?: unknown;
+        }> = [];
+        let steeredTurn: { readonly turnId: string } | undefined;
 
         yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
 
         const drain = yield* adapter.streamEvents.pipe(
           Stream.tap((event) => Effect.sync(() => events.push(event))),
+          Stream.tap((event) =>
+            event.type === "turn.started" && steeredTurn === undefined
+              ? adapter.sendTurn({ threadId, input: "HOLD again" }).pipe(
+                  Effect.tap((turn) =>
+                    Effect.sync(() => {
+                      steeredTurn = turn;
+                    }),
+                  ),
+                  Effect.andThen(adapter.interruptTurn(threadId)),
+                )
+              : Effect.void,
+          ),
           Stream.takeUntil((event) => event.type === "turn.completed"),
           Stream.runDrain,
           Effect.forkScoped,
         );
 
-        yield* adapter.sendTurn({ threadId, input: "HOLD" });
-        yield* adapter.interruptTurn(threadId);
+        const firstTurn = yield* adapter.sendTurn({ threadId, input: "HOLD" });
         yield* Fiber.awaitAll([drain]).pipe(Effect.timeout("30 seconds"));
 
+        assert.equal(steeredTurn?.turnId, firstTurn.turnId);
         const completed = events.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.turnId, firstTurn.turnId);
         assert.equal((completed?.payload as { state: string }).state, "interrupted");
 
         yield* adapter.stopAll();
@@ -629,6 +757,94 @@ it.layer(layer)("PiAdapter", (it) => {
         );
 
         yield* adapter.stopAll();
+      }),
+    ),
+  );
+
+  it.effect("resolves pending extension input before an unexpected exit", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const pidMarker = NodePath.join(config.baseDir, "unexpected-exit-pid");
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+          environment: { ...process.env, FAKE_PI_PID_MARKER: pidMarker },
+        });
+        const threadId = ThreadId.make("65656565-6565-4565-8565-656565656565");
+        const events: Array<{
+          type: string;
+          requestId?: string | undefined;
+          payload?: unknown;
+        }> = [];
+
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        const pid = Number(NodeFS.readFileSync(pidMarker, "utf8"));
+        const drain = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) => Effect.sync(() => events.push(event))),
+          Stream.tap((event) =>
+            event.type === "user-input.requested"
+              ? Effect.sync(() => process.kill(pid, "SIGKILL"))
+              : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.type === "session.exited"),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+
+        yield* adapter.sendTurn({ threadId, input: "ASK" });
+        yield* Fiber.awaitAll([drain]).pipe(Effect.timeout("30 seconds"));
+
+        const resolvedIndex = events.findIndex((event) => event.type === "user-input.resolved");
+        const exitedIndex = events.findIndex((event) => event.type === "session.exited");
+        assert.isAtLeast(resolvedIndex, 0);
+        assert.isAbove(exitedIndex, resolvedIndex);
+        assert.equal(events[resolvedIndex]?.requestId, "ui-select");
+        assert.deepEqual(events[resolvedIndex]?.payload, { answers: {} });
+        assert.isFalse(yield* adapter.hasSession(threadId));
+      }),
+    ).pipe(
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-unexpected-exit-test-" }),
+      ),
+    ),
+  );
+
+  it.effect("resolves pending extension input before a graceful stop", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const adapter = yield* makePiAdapter(settings, {
+          instanceId: ProviderInstanceId.make("pi"),
+        }).pipe(
+          Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "pi-adapter-test-" })),
+        );
+        const threadId = ThreadId.make("64646464-6464-4464-8464-646464646464");
+        const events: Array<{
+          type: string;
+          requestId?: string | undefined;
+          payload?: unknown;
+        }> = [];
+
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        const drain = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) => Effect.sync(() => events.push(event))),
+          Stream.tap((event) =>
+            event.type === "user-input.requested" ? adapter.stopSession(threadId) : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.type === "session.exited"),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+
+        yield* adapter.sendTurn({ threadId, input: "ASK" });
+        yield* Fiber.awaitAll([drain]).pipe(Effect.timeout("30 seconds"));
+
+        const resolvedIndex = events.findIndex((event) => event.type === "user-input.resolved");
+        const exitedIndex = events.findIndex((event) => event.type === "session.exited");
+        assert.isAtLeast(resolvedIndex, 0);
+        assert.isAbove(exitedIndex, resolvedIndex);
+        assert.equal(events[resolvedIndex]?.requestId, "ui-select");
+        assert.deepEqual(events[resolvedIndex]?.payload, { answers: {} });
+        assert.isFalse(yield* adapter.hasSession(threadId));
       }),
     ),
   );

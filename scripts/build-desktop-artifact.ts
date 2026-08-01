@@ -599,6 +599,7 @@ interface ResolvedBuildOptions {
   readonly arch: typeof BuildArch.Type;
   readonly version: string | undefined;
   readonly outputDir: string;
+  readonly cleanOutputDir: boolean;
   readonly skipBuild: boolean;
   readonly keepStage: boolean;
   readonly signed: boolean;
@@ -1113,6 +1114,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     repoRoot,
     mergeOptions(input.outputDir, env.outputDir, releaseDir),
   );
+  const cleanOutputDir = outputDir === path.resolve(repoRoot, releaseDir);
 
   const skipBuild = resolveBooleanFlag(input.skipBuild, env.skipBuild);
   const keepStage = resolveBooleanFlag(input.keepStage, env.keepStage);
@@ -1140,6 +1142,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     arch,
     version,
     outputDir,
+    cleanOutputDir,
     skipBuild,
     keepStage,
     signed,
@@ -1517,8 +1520,8 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 
 export function resolveDesktopProductName(version: string): string {
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "d4 (Nightly)"
-    : (desktopPackageJson.productName ?? "d4");
+    ? "piCode (Nightly)"
+    : (desktopPackageJson.productName ?? "piCode");
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -1538,7 +1541,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
     productName: resolveDesktopProductName(version),
-    artifactName: "d4-${version}-${arch}.${ext}",
+    artifactName: "piCode-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [...DESKTOP_FILE_EXCLUSIONS],
     directories: {
@@ -1578,7 +1581,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       protocols: [
         {
           name: "d4",
-          schemes: ["d4", "d4-dev"],
+          schemes: ["d4"],
         },
       ],
       ...(macPasskeySigning
@@ -1593,7 +1596,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
-      executableName: "d4",
+      executableName: "piCode",
       icon: "icons",
       category: "Development",
       desktop: {
@@ -1916,7 +1919,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     t3codeCommitHash: commitHash,
     private: true,
     packageManager: rootPackageJson.packageManager,
-    description: "d4 desktop build",
+    description: "piCode desktop build",
     author: "T3 Tools",
     main: "apps/desktop/dist-electron/main.cjs",
     build: yield* createBuildConfig(
@@ -2016,6 +2019,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         : `${buildEnv.DEBUG},electron-builder,electron-builder:*`;
   }
 
+  if (options.cleanOutputDir) {
+    yield* fs.remove(options.outputDir, { recursive: true, force: true });
+  }
   yield* Effect.log(
     `[desktop-artifact] Building ${options.platform}/${options.target} (arch=${options.arch}, version=${appVersion})...`,
   );
@@ -2140,7 +2146,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
     Flag.optional,
   ),
 }).pipe(
-  Command.withDescription("Build a desktop artifact for d4."),
+  Command.withDescription("Build a desktop artifact for piCode."),
   Command.withHandler((input) => Effect.flatMap(resolveBuildOptions(input), buildDesktopArtifact)),
 );
 

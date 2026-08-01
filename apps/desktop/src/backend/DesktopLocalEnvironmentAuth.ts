@@ -45,17 +45,18 @@ export class DesktopLocalEnvironmentAuth extends Context.Service<
 export const make = Effect.gen(function* () {
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const httpClient = yield* HttpClient.HttpClient;
-  const tokenRef = yield* Ref.make(Option.none<string>());
+  const tokenRef = yield* Ref.make(
+    Option.none<{
+      readonly httpBaseUrl: string;
+      readonly credential: string;
+      readonly token: string;
+    }>(),
+  );
   const mutex = yield* Semaphore.make(1);
 
   const getBearerToken = mutex
     .withPermits(1)(
       Effect.gen(function* () {
-        const cached = yield* Ref.get(tokenRef);
-        if (Option.isSome(cached)) {
-          return cached.value;
-        }
-
         const instances = yield* pool.list;
         const primary = instances.find((instance) => instance.id === PRIMARY_LOCAL_ENVIRONMENT_ID);
         const configOption = primary === undefined ? Option.none() : yield* primary.currentConfig;
@@ -67,11 +68,20 @@ export const make = Effect.gen(function* () {
         if (!credential) {
           return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
         }
+        const httpBaseUrl = config.httpBaseUrl.href;
+        const cached = yield* Ref.get(tokenRef);
+        if (
+          Option.isSome(cached) &&
+          cached.value.httpBaseUrl === httpBaseUrl &&
+          cached.value.credential === credential
+        ) {
+          return cached.value.token;
+        }
         const session = yield* bootstrapRemoteBearerSession({
-          httpBaseUrl: config.httpBaseUrl.href,
+          httpBaseUrl,
           credential,
           clientMetadata: {
-            label: "d4 Desktop",
+            label: "piCode Desktop",
             deviceType: "desktop",
           },
         }).pipe(
@@ -83,7 +93,14 @@ export const make = Effect.gen(function* () {
               }),
           ),
         );
-        yield* Ref.set(tokenRef, Option.some(session.access_token));
+        yield* Ref.set(
+          tokenRef,
+          Option.some({
+            httpBaseUrl,
+            credential,
+            token: session.access_token,
+          }),
+        );
         return session.access_token;
       }),
     )

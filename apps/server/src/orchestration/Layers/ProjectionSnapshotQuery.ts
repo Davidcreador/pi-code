@@ -35,6 +35,7 @@ import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
+import { MAX_THREAD_CHECKPOINTS } from "../../checkpointing/Utils.ts";
 import {
   isPersistenceError,
   toPersistenceDecodeError,
@@ -564,8 +565,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           checkpoint_files_json AS "files",
           assistant_message_id AS "assistantMessageId",
           completed_at AS "completedAt"
-        FROM projection_turns
-        WHERE checkpoint_turn_count IS NOT NULL
+        FROM (
+          SELECT
+            thread_id,
+            turn_id,
+            checkpoint_turn_count,
+            checkpoint_ref,
+            checkpoint_status,
+            checkpoint_files_json,
+            assistant_message_id,
+            completed_at,
+            ROW_NUMBER() OVER (
+              PARTITION BY thread_id
+              ORDER BY checkpoint_turn_count DESC
+            ) AS checkpoint_rank
+          FROM projection_turns
+          WHERE checkpoint_turn_count IS NOT NULL
+        )
+        WHERE checkpoint_rank <= ${MAX_THREAD_CHECKPOINTS}
         ORDER BY thread_id ASC, checkpoint_turn_count ASC
       `,
   });
@@ -908,9 +925,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           checkpoint_files_json AS "files",
           assistant_message_id AS "assistantMessageId",
           completed_at AS "completedAt"
-        FROM projection_turns
-        WHERE thread_id = ${threadId}
-          AND checkpoint_turn_count IS NOT NULL
+        FROM (
+          SELECT
+            thread_id,
+            turn_id,
+            checkpoint_turn_count,
+            checkpoint_ref,
+            checkpoint_status,
+            checkpoint_files_json,
+            assistant_message_id,
+            completed_at
+          FROM projection_turns
+          WHERE thread_id = ${threadId}
+            AND checkpoint_turn_count IS NOT NULL
+          ORDER BY checkpoint_turn_count DESC
+          LIMIT ${MAX_THREAD_CHECKPOINTS}
+        )
         ORDER BY checkpoint_turn_count ASC
       `,
   });

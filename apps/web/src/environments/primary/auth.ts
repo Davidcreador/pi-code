@@ -311,7 +311,14 @@ function isTransientBootstrapError(error: unknown): boolean {
   }
 
   if (error instanceof TypeError) {
-    return true;
+    const message = error.message.toLowerCase();
+    return [
+      "failed to fetch",
+      "fetch failed",
+      "load failed",
+      "network request failed",
+      "networkerror",
+    ].some((fragment) => message.includes(fragment));
   }
 
   return error instanceof DOMException && error.name === "AbortError";

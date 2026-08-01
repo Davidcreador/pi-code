@@ -5,13 +5,17 @@ import type {
   PiNativeAuthType,
   PiNativeResumeSessionsResult,
   PiNativeSafeSettings,
+  PiNativeScopedModelsResult,
   PiNativeShareResult,
   PiNativeSettingsScope,
   PiNativeSessionTree,
   ThreadId,
 } from "@t3tools/contracts";
 import { PI_NATIVE_IMPORT_MAX_BYTES } from "@t3tools/contracts";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  type AtomCommandResult,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import type * as Cause from "effect/Cause";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -32,6 +36,16 @@ import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 
 type SettingKey = keyof PiNativeSafeSettings;
+
+function formatScopedModelsSummary(result: PiNativeScopedModelsResult): string[] {
+  return [
+    ...result.models.map(
+      (model) =>
+        `${model.provider}/${model.id}${model.thinkingLevel ? ` (${model.thinkingLevel})` : ""}`,
+    ),
+    ...result.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`),
+  ];
+}
 type SettingSpec =
   | { readonly key: SettingKey; readonly label: string; readonly type: "boolean" }
   | { readonly key: SettingKey; readonly label: string; readonly type: "number" }
@@ -103,6 +117,46 @@ function safeHttpUrl(value: string): string | undefined {
   }
 }
 
+type PiAuthPollOutcome =
+  | { readonly status: "success"; readonly flow: PiNativeAuthFlow }
+  | { readonly status: "failure"; readonly message: string };
+
+export async function pollPiAuthFlow<E>(
+  request: () => Promise<AtomCommandResult<PiNativeAuthFlow, E>>,
+): Promise<PiAuthPollOutcome> {
+  try {
+    const result = await request();
+    const failure = failureMessage(result, "Could not read authentication progress.");
+    if (failure) return { status: "failure", message: failure };
+    if (result._tag === "Success") return { status: "success", flow: result.value };
+    return { status: "failure", message: "Could not read authentication progress." };
+  } catch (cause) {
+    return {
+      status: "failure",
+      message: cause instanceof Error ? cause.message : "Could not read authentication progress.",
+    };
+  }
+}
+
+export function nextPiAuthPollFailureCount(
+  failureCount: number,
+  outcome: PiAuthPollOutcome,
+): number {
+  return outcome.status === "failure" ? failureCount + 1 : 0;
+}
+
+export function piAuthPollDelayMs(failureCount: number): number {
+  if (failureCount === 0) return 500;
+  return Math.min(1_000 * 2 ** (failureCount - 1), 10_000);
+}
+
+export function isPiAuthDialogDismissBlocked(
+  flow: PiNativeAuthFlow | null,
+  failureCount: number,
+): boolean {
+  return flow?.status === "running" && failureCount === 0;
+}
+
 export function PiManagementCommandDialog(props: {
   command: PiManagementCommand;
   environmentId: EnvironmentId;
@@ -161,6 +215,7 @@ export function PiManagementCommandDialog(props: {
   );
   const [authState, setAuthState] = useState<PiNativeAuthState | null>(null);
   const [authFlow, setAuthFlow] = useState<PiNativeAuthFlow | null>(null);
+  const [authPollFailureCount, setAuthPollFailureCount] = useState(0);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
   const [selectedAuthType, setSelectedAuthType] = useState<PiNativeAuthType | null>(null);
   const [authResponse, setAuthResponse] = useState("");
@@ -223,15 +278,7 @@ export function PiManagementCommandDialog(props: {
         if (failure) throw new Error(failure);
         if (!cancelled && result._tag === "Success") {
           setPatterns(result.value.patterns.join("\n"));
-          setModelSummary([
-            ...result.value.models.map(
-              (model) =>
-                `${model.provider}/${model.id}${model.thinkingLevel ? ` (${model.thinkingLevel})` : ""}`,
-            ),
-            ...result.value.diagnostics.map(
-              (diagnostic) => `${diagnostic.code}: ${diagnostic.message}`,
-            ),
-          ]);
+          setModelSummary(formatScopedModelsSummary(result.value));
         }
       } else if (props.command === "resume") {
         const result = await listResumeSessions(threadInput);
@@ -304,36 +351,34 @@ export function PiManagementCommandDialog(props: {
     if (!authFlow || authFlow.status !== "running") return;
     let cancelled = false;
     const timeout = window.setTimeout(() => {
-      void getAuthFlow({
-        environmentId: props.environmentId,
-        input: { threadId: props.threadId, flowId: authFlow.flowId },
-      })
-        .then((result) => {
-          if (cancelled) return;
-          const failure = failureMessage(result, "Could not read authentication progress.");
-          if (failure) return setError(failure);
-          if (result._tag === "Success") {
-            setAuthFlow(result.value);
-            if (result.value.status === "succeeded") setNotice("Authentication completed.");
-            if (result.value.status === "cancelled") setNotice("Authentication cancelled.");
-            if (result.value.status === "failed") {
-              setError(result.value.error ?? "Authentication failed.");
-            }
-          }
-        })
-        .catch((cause: unknown) => {
-          if (!cancelled) {
-            setError(
-              cause instanceof Error ? cause.message : "Could not read authentication progress.",
-            );
-          }
-        });
-    }, 500);
+      void pollPiAuthFlow(() =>
+        getAuthFlow({
+          environmentId: props.environmentId,
+          input: { threadId: props.threadId, flowId: authFlow.flowId },
+        }),
+      ).then((outcome) => {
+        if (cancelled) return;
+        if (outcome.status === "failure") {
+          setError(outcome.message);
+          setAuthPollFailureCount((count) => nextPiAuthPollFailureCount(count, outcome));
+          return;
+        }
+
+        setAuthFlow(outcome.flow);
+        setAuthPollFailureCount((count) => nextPiAuthPollFailureCount(count, outcome));
+        setError(null);
+        if (outcome.flow.status === "succeeded") setNotice("Authentication completed.");
+        if (outcome.flow.status === "cancelled") setNotice("Authentication cancelled.");
+        if (outcome.flow.status === "failed") {
+          setError(outcome.flow.error ?? "Authentication failed.");
+        }
+      });
+    }, piAuthPollDelayMs(authPollFailureCount));
     return () => {
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [authFlow, getAuthFlow, props.environmentId, props.threadId]);
+  }, [authFlow, authPollFailureCount, getAuthFlow, props.environmentId, props.threadId]);
 
   useEffect(() => {
     setAuthResponse("");
@@ -347,6 +392,7 @@ export function PiManagementCommandDialog(props: {
   const selectedProvider =
     authState?.providers.find((provider) => provider.id === selectedProviderId) ?? null;
   const authActive = authFlow?.status === "running";
+  const authDismissBlocked = isPiAuthDialogDismissBlocked(authFlow, authPollFailureCount);
   const authNotificationUrl =
     authFlow?.notification?.type === "auth_url"
       ? safeHttpUrl(authFlow.notification.url)
@@ -360,7 +406,7 @@ export function PiManagementCommandDialog(props: {
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open && !busy && !authActive) props.onClose();
+        if (!open && !busy && !authDismissBlocked) props.onClose();
       }}
     >
       <DialogPopup className="w-full max-w-2xl">
@@ -757,7 +803,7 @@ export function PiManagementCommandDialog(props: {
           ) : null}
         </DialogPanel>
         <DialogFooter>
-          <Button variant="outline" disabled={busy || authActive} onClick={props.onClose}>
+          <Button variant="outline" disabled={busy || authDismissBlocked} onClick={props.onClose}>
             Close
           </Button>
 
@@ -804,12 +850,7 @@ export function PiManagementCommandDialog(props: {
                   if (failure) throw new Error(failure);
                   if (result._tag === "Success") {
                     setPatterns(result.value.patterns.join("\n"));
-                    setModelSummary([
-                      ...result.value.models.map((model) => `${model.provider}/${model.id}`),
-                      ...result.value.diagnostics.map(
-                        (diagnostic) => `${diagnostic.code}: ${diagnostic.message}`,
-                      ),
-                    ]);
+                    setModelSummary(formatScopedModelsSummary(result.value));
                     setNotice("Scoped models saved.");
                   }
                 })
@@ -958,7 +999,10 @@ export function PiManagementCommandDialog(props: {
                   });
                   const failure = failureMessage(result, "Could not start authentication.");
                   if (failure) throw new Error(failure);
-                  if (result._tag === "Success") setAuthFlow(result.value);
+                  if (result._tag === "Success") {
+                    setAuthFlow(result.value);
+                    setAuthPollFailureCount(0);
+                  }
                 })
               }
             >
@@ -983,7 +1027,10 @@ export function PiManagementCommandDialog(props: {
                   setAuthResponse("");
                   const failure = failureMessage(result, "Could not answer authentication prompt.");
                   if (failure) throw new Error(failure);
-                  if (result._tag === "Success") setAuthFlow(result.value);
+                  if (result._tag === "Success") {
+                    setAuthFlow(result.value);
+                    setAuthPollFailureCount(0);
+                  }
                 })
               }
             >
@@ -1003,7 +1050,10 @@ export function PiManagementCommandDialog(props: {
                   });
                   const failure = failureMessage(result, "Could not cancel authentication.");
                   if (failure) throw new Error(failure);
-                  if (result._tag === "Success") setAuthFlow(result.value);
+                  if (result._tag === "Success") {
+                    setAuthFlow(result.value);
+                    setAuthPollFailureCount(0);
+                  }
                 })
               }
             >

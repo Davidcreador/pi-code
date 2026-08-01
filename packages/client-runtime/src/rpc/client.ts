@@ -1,7 +1,7 @@
 import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
-import type * as Duration from "effect/Duration";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -170,9 +170,14 @@ interface SubscriptionOptions<TTag extends EnvironmentSubscriptionRpcTag> {
   readonly onExpectedFailure?: (
     cause: Cause.Cause<EnvironmentRpcStreamFailure<TTag>>,
   ) => Effect.Effect<void, never, never>;
-  readonly retryExpectedFailureAfter?: Duration.Input;
+  readonly shouldRetryExpectedFailure?: (
+    cause: Cause.Cause<EnvironmentRpcStreamFailure<TTag>>,
+  ) => boolean;
   readonly resubscribe?: Stream.Stream<unknown, never, never>;
 }
+
+const expectedFailureRetryDelay = (attempt: number) =>
+  Duration.millis(Math.min(250 * 2 ** attempt, 30_000));
 
 export function subscribeDynamic<TTag extends EnvironmentSubscriptionRpcTag>(
   tag: TTag,
@@ -197,7 +202,9 @@ export function subscribeDynamic<TTag extends EnvironmentSubscriptionRpcTag>(
                 Stream.mapEffect(() => SubscriptionRef.get(supervisor.session)),
               ),
             );
+      let subscriptionTerminated = false;
       return sessions.pipe(
+        Stream.filter(() => !subscriptionTerminated),
         Stream.switchMap(
           Option.match({
             onNone: () => Stream.empty,
@@ -208,6 +215,7 @@ export function subscribeDynamic<TTag extends EnvironmentSubscriptionRpcTag>(
                 EnvironmentRpcStreamValue<TTag>,
                 EnvironmentRpcStreamFailure<TTag>
               >;
+              let retryAttempt = 0;
               const subscribeToSession = (): Stream.Stream<
                 EnvironmentRpcStreamValue<TTag>,
                 EnvironmentRpcStreamFailure<TTag>
@@ -222,6 +230,7 @@ export function subscribeDynamic<TTag extends EnvironmentSubscriptionRpcTag>(
                         input,
                       });
                       return method(input).pipe(
+                        Stream.tap(() => Effect.sync(() => (retryAttempt = 0))),
                         Stream.ensuring(completeObservation),
                         Stream.catchCause((cause) => {
                           const hasOnlyExpectedFailures =
@@ -248,14 +257,18 @@ export function subscribeDynamic<TTag extends EnvironmentSubscriptionRpcTag>(
                             const handled = Stream.fromEffect(
                               options.onExpectedFailure(cause),
                             ).pipe(Stream.drain);
-                            if (options.retryExpectedFailureAfter === undefined) {
+                            const shouldRetry = options.shouldRetryExpectedFailure?.(cause);
+                            if (shouldRetry !== true) {
+                              if (shouldRetry === false) {
+                                subscriptionTerminated = true;
+                              }
                               return handled;
                             }
+                            const retryDelay = expectedFailureRetryDelay(retryAttempt);
+                            retryAttempt += 1;
                             return handled.pipe(
                               Stream.concat(
-                                Stream.fromEffect(
-                                  Effect.sleep(options.retryExpectedFailureAfter),
-                                ).pipe(Stream.drain),
+                                Stream.fromEffect(Effect.sleep(retryDelay)).pipe(Stream.drain),
                               ),
                               Stream.concat(subscribeToSession()),
                             );

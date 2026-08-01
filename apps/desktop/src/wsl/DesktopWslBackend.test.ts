@@ -36,6 +36,7 @@ function makeStubInstance(input: {
 
 const idleSnapshot: DesktopBackendSnapshot = {
   desiredRunning: false,
+  startInProgress: false,
   ready: false,
   activePid: Option.none(),
   restartAttempt: 5,
@@ -44,10 +45,36 @@ const idleSnapshot: DesktopBackendSnapshot = {
 
 const primarySnapshot: DesktopBackendSnapshot = {
   desiredRunning: true,
+  startInProgress: false,
   ready: true,
   activePid: Option.some(123),
   restartAttempt: 0,
   restartScheduled: false,
+};
+
+const baseWslConfig: DesktopBackendStartConfig = {
+  executablePath: "wsl.exe",
+  args: [],
+  entryPath: "/server/bin.mjs",
+  cwd: "/server",
+  env: {},
+  bootstrap: {
+    mode: "desktop",
+    noBrowser: true,
+    port: 3774,
+    t3Home: "/tmp/d4",
+    host: "0.0.0.0",
+    desktopBootstrapToken: "token",
+    tailscaleServeEnabled: false,
+    tailscaleServePort: 443,
+    desktopTelemetryFd: 4,
+    desktopTelemetryControlFd: 5,
+  },
+  bootstrapDelivery: "stdin",
+  extendEnv: false,
+  httpBaseUrl: new URL("http://127.0.0.1:3774"),
+  captureOutput: true,
+  preflightFailure: Option.none(),
 };
 
 const serverExposureLayer = Layer.succeed(DesktopServerExposure.DesktopServerExposure, {
@@ -82,6 +109,138 @@ const netLayer = Layer.succeed(NetService.NetService, {
 } satisfies NetService.NetService["Service"]);
 
 describe("DesktopWslBackend", () => {
+  it.effect("wraps WSL port scans while excluding the primary port", () =>
+    Effect.gen(function* () {
+      const tailCalls: number[] = [];
+      const tailNet = Layer.succeed(NetService.NetService, {
+        canListenOnHost: (port) =>
+          Effect.sync(() => {
+            tailCalls.push(port);
+            return port === 1024;
+          }),
+        isPortAvailableOnLoopback: () => Effect.succeed(true),
+        reserveLoopbackPort: () => Effect.succeed(41773),
+        findAvailablePort: (preferred) => Effect.succeed(preferred),
+      });
+      const maxPrimaryCalls: number[] = [];
+      const maxPrimaryNet = Layer.succeed(NetService.NetService, {
+        canListenOnHost: (port) =>
+          Effect.sync(() => {
+            maxPrimaryCalls.push(port);
+            return true;
+          }),
+        isPortAvailableOnLoopback: () => Effect.succeed(true),
+        reserveLoopbackPort: () => Effect.succeed(41773),
+        findAvailablePort: (preferred) => Effect.succeed(preferred),
+      });
+
+      const wrapped = yield* DesktopWslBackend.scanForWslPort(65_535, 65_534).pipe(
+        Effect.provide(tailNet),
+      );
+      const afterMaxPrimary = yield* DesktopWslBackend.scanForWslPort(65_536, 65_535).pipe(
+        Effect.provide(maxPrimaryNet),
+      );
+      const excludingPrimary = yield* DesktopWslBackend.scanForWslPort(1_024, 1_024).pipe(
+        Effect.provide(maxPrimaryNet),
+      );
+
+      assert.equal(wrapped, 1_024);
+      assert.deepEqual(tailCalls, [65_535, 1_024]);
+      assert.equal(afterMaxPrimary, 1_024);
+      assert.equal(excludingPrimary, 1_025);
+      assert.deepEqual(maxPrimaryCalls, [1_024, 1_025]);
+    }),
+  );
+
+  it.effect("rescans from the next port for each WSL backend run", () => {
+    let registeredSpec: DesktopBackendPool.BackendInstanceSpec | undefined;
+    let nextAvailablePort = 3775;
+    const resolvedPorts: number[] = [];
+    const primary = makeStubInstance({
+      id: DesktopBackendPool.PRIMARY_INSTANCE_ID,
+      label: "Windows",
+      snapshot: primarySnapshot,
+    });
+    const wsl = makeStubInstance({
+      id: DesktopBackendPool.BackendInstanceId("wsl:Ubuntu"),
+      label: "WSL (Ubuntu)",
+      snapshot: idleSnapshot,
+    });
+    const poolLayer = Layer.succeed(DesktopBackendPool.DesktopBackendPool, {
+      get: () => Effect.succeed(Option.none<DesktopBackendPool.DesktopBackendInstance>()),
+      list: Effect.succeed([primary]),
+      primary: Effect.succeed(primary),
+      register: (spec) =>
+        Effect.sync(() => {
+          registeredSpec = spec;
+          return wsl;
+        }),
+      unregister: () => Effect.die("unexpected unregister"),
+    } satisfies DesktopBackendPool.DesktopBackendPool["Service"]);
+    const configurationLayer = Layer.succeed(
+      DesktopBackendConfiguration.DesktopBackendConfiguration,
+      {
+        resolvePrimary: Effect.die("unexpected resolvePrimary"),
+        resolvePrimaryLabel: Effect.succeed("Windows"),
+        resolveWsl: ({ port }) =>
+          Effect.sync(() => {
+            resolvedPorts.push(port);
+            return {
+              ...baseWslConfig,
+              bootstrap: { ...baseWslConfig.bootstrap, port },
+              httpBaseUrl: new URL(`http://127.0.0.1:${port}`),
+            };
+          }),
+      } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"],
+    );
+    const scanningNetLayer = Layer.succeed(NetService.NetService, {
+      canListenOnHost: (port) =>
+        Effect.sync(() => {
+          if (port !== nextAvailablePort) return false;
+          nextAvailablePort += 1;
+          return true;
+        }),
+      isPortAvailableOnLoopback: () => Effect.succeed(true),
+      reserveLoopbackPort: () => Effect.succeed(41773),
+      findAvailablePort: (preferred) => Effect.succeed(preferred),
+    } satisfies NetService.NetService["Service"]);
+
+    return Effect.gen(function* () {
+      const backend = yield* DesktopWslBackend.DesktopWslBackend;
+      yield* backend.reconcile;
+      const spec = registeredSpec;
+      assert.isDefined(spec);
+      if (spec === undefined) {
+        return yield* Effect.die("Expected WSL backend registration");
+      }
+
+      const first = yield* spec.configResolve;
+      const second = yield* spec.configResolve;
+
+      assert.deepEqual(resolvedPorts, [3775, 3776]);
+      assert.equal(first.httpBaseUrl.port, "3775");
+      assert.equal(second.httpBaseUrl.port, "3776");
+    }).pipe(
+      Effect.provide(
+        DesktopWslBackend.layer.pipe(
+          Layer.provideMerge(poolLayer),
+          Layer.provideMerge(configurationLayer),
+          Layer.provideMerge(serverExposureLayer),
+          Layer.provideMerge(scanningNetLayer),
+          Layer.provideMerge(
+            DesktopAppSettings.layerTest({
+              ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+              wslBackendEnabled: true,
+              wslDistro: "Ubuntu",
+              wslOnly: false,
+            }),
+          ),
+          Layer.provideMerge(DesktopWslEnvironment.layerTest({ isAvailable: true })),
+        ),
+      ),
+    );
+  });
+
   it.effect("clears the stored preflight error when a registered WSL backend becomes ready", () => {
     let registeredSpec: DesktopBackendPool.BackendInstanceSpec | undefined;
     const primary = makeStubInstance({

@@ -4,6 +4,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { beforeEach, vi } from "vite-plus/test";
 
+import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
+
 const { createClerkBridgeMock, storageAdapter, storageMock } = vi.hoisted(() => ({
   createClerkBridgeMock: vi.fn(),
   storageAdapter: {
@@ -29,6 +33,7 @@ const makeDesktopClerkLayer = (isDevelopment = true) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
     stateDir: "/tmp/t3-state",
     isDevelopment,
+    userDataDirName: isDevelopment ? "d4-dev" : "d4",
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
 
   return DesktopClerk.layer.pipe(
@@ -123,6 +128,62 @@ describe("DesktopClerk", () => {
       }
     });
   });
+
+  it.effect(
+    "shows an error before quitting and interrupts when the instance lock is denied",
+    () => {
+      const calls: Array<string> = [];
+      const showErrorBox = vi.fn((title: string, content: string) =>
+        Effect.sync(() => {
+          calls.push("dialog");
+          assert.equal(title, "piCode is already running");
+          assert.equal(
+            content,
+            "piCode is already running — or an older d4 build is. Quit the other app and try again.",
+          );
+        }),
+      );
+      const on = vi.fn(() => Effect.die("unexpected second-instance listener registration"));
+      const electronApp = ElectronApp.ElectronApp.of({
+        requestSingleInstanceLock: Effect.succeed(false),
+        quit: Effect.sync(() => {
+          calls.push("quit");
+        }),
+        on,
+      } as unknown as ElectronApp.ElectronApp["Service"]);
+      const electronDialog = ElectronDialog.ElectronDialog.of({
+        showErrorBox,
+      } as unknown as ElectronDialog.ElectronDialog["Service"]);
+      const electronWindow = ElectronWindow.ElectronWindow.of(
+        {} as ElectronWindow.ElectronWindow["Service"],
+      );
+      storageMock.mockReturnValue(storageAdapter);
+      createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn() });
+
+      return Effect.gen(function* () {
+        const clerk = yield* DesktopClerk.DesktopClerk;
+        const exit = yield* Effect.exit(clerk.configure);
+
+        assert.equal(exit._tag, "Failure");
+        if (exit._tag === "Failure") {
+          assert.isTrue(Cause.hasInterruptsOnly(exit.cause));
+        }
+        assert.deepEqual(calls, ["dialog", "quit"]);
+        assert.equal(showErrorBox.mock.calls.length, 1);
+        assert.equal(on.mock.calls.length, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            makeDesktopClerkLayer(),
+            Layer.succeed(ElectronApp.ElectronApp, electronApp),
+            Layer.succeed(ElectronDialog.ElectronDialog, electronDialog),
+            Layer.succeed(ElectronWindow.ElectronWindow, electronWindow),
+          ),
+        ),
+        Effect.scoped,
+      );
+    },
+  );
 
   it.each([
     { isDevelopment: true, scheme: "d4-dev" },

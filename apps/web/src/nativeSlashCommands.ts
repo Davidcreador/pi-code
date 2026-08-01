@@ -11,7 +11,7 @@ export const NATIVE_SLASH_COMMANDS = [
   { command: "session", description: "Show Pi session state and statistics" },
   { command: "stats", description: "Show Pi session state and statistics" },
   { command: "export", description: "Export the Pi session as HTML" },
-  { command: "quit", description: "Quit d4 (stop this session in a browser)" },
+  { command: "quit", description: "Quit piCode (stop this session in a browser)" },
   { command: "hotkeys", description: "Show keyboard shortcuts" },
   { command: "settings", description: "Configure Pi settings" },
   { command: "scoped-models", description: "Configure models available to Pi" },

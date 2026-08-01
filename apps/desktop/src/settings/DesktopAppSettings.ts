@@ -122,6 +122,7 @@ const DesktopSettingsWriteOperation = Schema.Literals([
   "encode-document",
   "create-directory",
   "write-temporary-file",
+  "secure-temporary-file",
   "replace-settings-file",
 ]);
 type DesktopSettingsWriteOperation = typeof DesktopSettingsWriteOperation.Type;
@@ -421,6 +422,16 @@ const writeSettings = Effect.fn("desktop.settings.writeSettings")(function* (inp
       (cause) =>
         new DesktopSettingsWriteError({
           operation: "write-temporary-file",
+          path: tempPath,
+          cause,
+        }),
+    ),
+  );
+  yield* input.fileSystem.chmod(tempPath, 0o600).pipe(
+    Effect.mapError(
+      (cause) =>
+        new DesktopSettingsWriteError({
+          operation: "secure-temporary-file",
           path: tempPath,
           cause,
         }),

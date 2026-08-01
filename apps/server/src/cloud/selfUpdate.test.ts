@@ -305,6 +305,7 @@ it.layer(NodeServices.layer)("ServerSelfUpdate.update", (it) => {
         : ServerConfig.layerTest(home, baseDir);
     const service = yield* SelfUpdate.make({
       host: {
+        pid: 4_242,
         spawnDetached: (command, args) =>
           Effect.sync(() => spawns.push({ command, args })).pipe(
             Effect.andThen(
@@ -483,6 +484,8 @@ it.layer(NodeServices.layer)("ServerSelfUpdate.update", (it) => {
       assert.lengthOf(context.spawns, 1);
       const spawn = context.spawns[0];
       assert.equal(spawn?.command, "/bin/sh");
+      assert.equal(spawn?.args[1]?.includes("kill -0"), true);
+      assert.equal(spawn?.args[3], "4242");
       assert.include(spawn?.args ?? [], pinnedEntry);
       // The replacement replays the original CLI arguments.
       assert.include(spawn?.args ?? [], "serve");

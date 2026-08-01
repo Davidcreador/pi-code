@@ -8,6 +8,7 @@ import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -207,4 +208,12 @@ const desktopRuntimeLayer = desktopClerkLayer.pipe(
   ),
 );
 
-DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer), NodeRuntime.runMain);
+Effect.scoped(
+  DesktopApp.buildRuntimeLayerWithFatalStartupReport(desktopRuntimeLayer, (cause) =>
+    Effect.sync(() => {
+      const report = DesktopApp.describeFatalStartupError("runtime-layer", Cause.pretty(cause));
+      Electron.dialog.showErrorBox(report.title, report.content);
+      Electron.app.quit();
+    }),
+  ).pipe(Effect.flatMap((context) => DesktopApp.program.pipe(Effect.provide(context)))),
+).pipe(NodeRuntime.runMain);

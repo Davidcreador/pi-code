@@ -99,6 +99,7 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
         const stoppedPreflight =
           Option.isSome(config) &&
           Option.isSome(config.value.preflightFailure) &&
+          !snapshot.startInProgress &&
           (!snapshot.desiredRunning || !snapshot.restartScheduled);
         if (isPrimary || fatalPreflight || stoppedPreflight) continue;
         bootstraps.push({

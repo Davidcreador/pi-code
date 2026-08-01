@@ -1,5 +1,6 @@
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -99,42 +100,74 @@ const resolveDesktopBackendPort = Effect.fn("resolveDesktopBackendPort")(functio
   });
 });
 
-const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupError")(function* (
+export function describeFatalStartupError(
   stage: string,
   error: unknown,
-): Effect.fn.Return<
-  void,
-  never,
-  | DesktopShutdown.DesktopShutdown
-  | DesktopState.DesktopState
-  | ElectronApp.ElectronApp
-  | ElectronDialog.ElectronDialog
-> {
-  const shutdown = yield* DesktopShutdown.DesktopShutdown;
-  const state = yield* DesktopState.DesktopState;
-  const electronApp = yield* ElectronApp.ElectronApp;
-  const electronDialog = yield* ElectronDialog.ElectronDialog;
+): {
+  readonly title: string;
+  readonly content: string;
+  readonly message: string;
+  readonly detail: string;
+} {
   const message = error instanceof Error ? error.message : String(error);
   const detail =
     error instanceof Error && typeof error.stack === "string" ? `\n${error.stack}` : "";
-  yield* logStartupError("fatal startup error", {
-    stage,
+  return {
+    title: "piCode failed to start",
+    content: `Stage: ${stage}\n${message}${detail}`,
     message,
-    ...(detail.length > 0 ? { detail } : {}),
-  });
-  const wasQuitting = yield* Ref.getAndSet(state.quitting, true);
-  if (!wasQuitting) {
-    yield* electronDialog.showErrorBox(
-      "d4 failed to start",
-      `Stage: ${stage}\n${message}${detail}`,
-    );
-  }
-  yield* shutdown.request;
-  yield* electronApp.quit;
-});
+    detail,
+  };
+}
 
-const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
-  handleFatalStartupError(stage, Cause.pretty(cause)).pipe(Effect.andThen(Effect.failCause(cause)));
+export const catchFatalStartupCause = <A, E, R, B, R2>(
+  effect: Effect.Effect<A, E, R>,
+  onFatal: (cause: Cause.Cause<E>) => Effect.Effect<B, E, R2>,
+) =>
+  effect.pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : onFatal(cause),
+    ),
+  );
+
+export const buildRuntimeLayerWithFatalStartupReport = <ROut, E, RIn, R2>(
+  layer: Layer.Layer<ROut, E, RIn>,
+  reportFatal: (cause: Cause.Cause<E>) => Effect.Effect<void, never, R2>,
+) =>
+  catchFatalStartupCause(Layer.build(layer), (cause) =>
+    reportFatal(cause).pipe(Effect.andThen(Effect.failCause(cause))),
+  );
+
+export const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupError")(
+  function* (
+    stage: string,
+    error: unknown,
+  ): Effect.fn.Return<
+    void,
+    never,
+    | DesktopShutdown.DesktopShutdown
+    | DesktopState.DesktopState
+    | ElectronApp.ElectronApp
+    | ElectronDialog.ElectronDialog
+  > {
+    const shutdown = yield* DesktopShutdown.DesktopShutdown;
+    const state = yield* DesktopState.DesktopState;
+    const electronApp = yield* ElectronApp.ElectronApp;
+    const electronDialog = yield* ElectronDialog.ElectronDialog;
+    const report = describeFatalStartupError(stage, error);
+    yield* logStartupError("fatal startup error", {
+      stage,
+      message: report.message,
+      ...(report.detail.length > 0 ? { detail: report.detail } : {}),
+    });
+    const wasQuitting = yield* Ref.getAndSet(state.quitting, true);
+    if (!wasQuitting) {
+      yield* electronDialog.showErrorBox(report.title, report.content);
+    }
+    yield* shutdown.request;
+    yield* electronApp.quit;
+  },
+);
 
 const bootstrap = Effect.gen(function* () {
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
@@ -240,15 +273,12 @@ const startup = Effect.gen(function* () {
   yield* lifecycle.register;
   yield* clerk.configure;
 
-  yield* electronApp.whenReady.pipe(
-    Effect.withSpan("desktop.electron.whenReady"),
-    Effect.catchCause((cause) => fatalStartupCause("whenReady", cause)),
-  );
+  yield* electronApp.whenReady.pipe(Effect.withSpan("desktop.electron.whenReady"));
   yield* logStartupInfo("app ready");
   yield* appIdentity.configure;
   yield* applicationMenu.configure;
   yield* updates.configure;
-  yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
+  yield* bootstrap;
 }).pipe(Effect.withSpan("desktop.startup"));
 
 const scopedProgram = Effect.scoped(
@@ -274,7 +304,9 @@ const scopedProgram = Effect.scoped(
       }).pipe(Effect.ensuring(shutdown.markComplete)),
     );
 
-    yield* startup;
+    yield* catchFatalStartupCause(startup, (cause) =>
+      handleFatalStartupError("startup", Cause.pretty(cause)),
+    );
     yield* shutdown.awaitRequest;
   }),
 );

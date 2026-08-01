@@ -20,9 +20,9 @@ const defaultEnvironmentInput = {
   platform: "darwin",
   processArch: "arm64",
   appVersion: "1.2.3",
-  appPath: "/Applications/d4.app/Contents/Resources/app.asar",
+  appPath: "/Applications/piCode.app/Contents/Resources/app.asar",
   isPackaged: true,
-  resourcesPath: "/Applications/d4.app/Contents/Resources",
+  resourcesPath: "/Applications/piCode.app/Contents/Resources",
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
@@ -39,7 +39,7 @@ interface ElectronAppCalls {
 const makeElectronAppLayer = (calls: ElectronAppCalls) =>
   Layer.succeed(ElectronApp.ElectronApp, {
     metadata: Effect.die("unexpected metadata read"),
-    name: Effect.succeed("d4"),
+    name: Effect.succeed("piCode"),
     whenReady: Effect.void,
     quit: Effect.void,
     exit: () => Effect.void,
@@ -194,8 +194,8 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         yield* identity.configure;
 
-        assert.deepEqual(calls.setName, ["d4"]);
-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "d4");
+        assert.deepEqual(calls.setName, ["piCode"]);
+        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "piCode");
         assert.equal(calls.setAboutPanelOptions[0]?.applicationVersion, "1.2.3");
         assert.equal(calls.setAboutPanelOptions[0]?.version, "0123456789ab");
         assert.deepEqual(calls.setDockIcon, ["/icon.png"]);

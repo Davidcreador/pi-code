@@ -63,7 +63,7 @@ export class DesktopSshPromptWindowUnavailableError extends Schema.TaggedErrorCl
 ) {
   override get message(): string {
     const request = this.requestId === null ? "before a request id was assigned" : this.requestId;
-    return `d4 window is unavailable during ${this.stage} for SSH authentication to ${this.destination} (request: ${request}).`;
+    return `piCode window is unavailable during ${this.stage} for SSH authentication to ${this.destination} (request: ${request}).`;
   }
 }
 

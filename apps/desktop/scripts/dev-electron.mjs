@@ -1,4 +1,5 @@
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -8,6 +9,15 @@ import {
   resolveDevProtocolClient,
   resolveElectronLaunchCommand,
 } from "./electron-launcher.mjs";
+import {
+  claimDevElectronPids,
+  clearDevElectronPids,
+  updateDevElectronApp,
+} from "./dev-electron-pid.mjs";
+import {
+  recordSpawnedDevApp,
+  settlePendingRestartBeforeShutdown,
+} from "./dev-electron-lifecycle.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
@@ -30,19 +40,13 @@ const watchedDirectories = [
   { directory: "dist-electron", files: new Set(["main.cjs", "preload.cjs"]) },
   { directory: "../server/dist", files: new Set(["bin.mjs"]) },
 ];
-const forcedShutdownTimeoutMs = 1_500;
+const forcedShutdownTimeoutMs = 3_000;
 const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
+const devPidFilePath = NodePath.join(desktopDir, ".electron-runtime", "dev-electron.pid");
 const remoteDebuggingPort = process.env.T3CODE_DESKTOP_REMOTE_DEBUGGING_PORT?.trim();
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev script has no Effect runtime.
 const hostPlatform = NodeOS.platform();
-
-await waitForResources({
-  baseDir: desktopDir,
-  files: requiredFiles,
-  tcpHost: devServer.hostname,
-  tcpPort: port,
-});
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
@@ -52,29 +56,22 @@ if (devProtocolClient) {
   childEnv.T3CODE_DESKTOP_PROTOCOL_REGISTRATION_MANAGED = "1";
 }
 
+const ownerId = NodeCrypto.randomUUID();
 let shuttingDown = false;
 let restartTimer = null;
 let currentApp = null;
 let restartQueue = Promise.resolve();
 const expectedExits = new WeakSet();
+const appLaunchIds = new WeakMap();
 const watchers = [];
 
-function killChildTreeByPid(pid, signal) {
-  if (hostPlatform === "win32" || typeof pid !== "number") {
-    return;
+function isCapturedPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
   }
-
-  NodeChildProcess.spawnSync("pkill", [`-${signal}`, "-P", String(pid)], { stdio: "ignore" });
-}
-
-function cleanupStaleDevApps() {
-  if (hostPlatform === "win32") {
-    return;
-  }
-
-  NodeChildProcess.spawnSync("pkill", ["-f", "--", `--t3code-dev-root=${desktopDir}`], {
-    stdio: "ignore",
-  });
 }
 
 function startApp() {
@@ -92,14 +89,28 @@ function startApp() {
   const app = NodeChildProcess.spawn(electronCommand.electronPath, electronCommand.args, {
     cwd: desktopDir,
     env: childEnv,
-    stdio: "inherit",
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
   });
+  const launchId = NodeCrypto.randomUUID();
 
   currentApp = app;
+  appLaunchIds.set(app, launchId);
+  if (typeof app.pid === "number") {
+    recordSpawnedDevApp(
+      () =>
+        updateDevElectronApp(devPidFilePath, ownerId, null, { pid: app.pid, launchId }, desktopDir),
+      () => {
+        app.kill("SIGKILL");
+      },
+    );
+  }
 
   app.once("error", () => {
     if (currentApp === app) {
       currentApp = null;
+    }
+    if (typeof app.pid === "number") {
+      updateDevElectronApp(devPidFilePath, ownerId, launchId, null, desktopDir);
     }
 
     if (!shuttingDown) {
@@ -110,6 +121,9 @@ function startApp() {
   app.once("exit", (code, signal) => {
     if (currentApp === app) {
       currentApp = null;
+    }
+    if (typeof app.pid === "number") {
+      updateDevElectronApp(devPidFilePath, ownerId, launchId, null, desktopDir);
     }
 
     const exitedAbnormally = signal !== null || code !== 0;
@@ -127,6 +141,7 @@ async function stopApp() {
 
   currentApp = null;
   expectedExits.add(app);
+  const launchId = appLaunchIds.get(app);
 
   await new Promise((resolve) => {
     let settled = false;
@@ -137,13 +152,25 @@ async function stopApp() {
       }
 
       settled = true;
+      if (typeof app.pid === "number" && typeof launchId === "string") {
+        updateDevElectronApp(devPidFilePath, ownerId, launchId, null, desktopDir);
+      }
       resolve();
     };
 
     app.once("exit", finish);
-    app.kill("SIGTERM");
-    killChildTreeByPid(app.pid, "TERM");
-    cleanupStaleDevApps();
+    let gracefulQuitRequested = false;
+    if (app.connected) {
+      try {
+        app.send({ type: "picode-dev-shutdown" });
+        gracefulQuitRequested = true;
+      } catch {
+        // Fall through to POSIX SIGTERM or the forced timeout.
+      }
+    }
+    if (!gracefulQuitRequested && hostPlatform !== "win32") {
+      app.kill("SIGTERM");
+    }
 
     setTimeout(() => {
       if (settled) {
@@ -151,8 +178,6 @@ async function stopApp() {
       }
 
       app.kill("SIGKILL");
-      killChildTreeByPid(app.pid, "KILL");
-      cleanupStaleDevApps();
       finish();
     }, forcedShutdownTimeoutMs).unref();
   });
@@ -198,17 +223,6 @@ function startWatchers() {
   }
 }
 
-function killChildTree(signal) {
-  if (hostPlatform === "win32") {
-    return;
-  }
-
-  // Kill direct children as a final fallback in case normal shutdown leaves stragglers.
-  NodeChildProcess.spawnSync("pkill", [`-${signal}`, "-P", String(process.pid)], {
-    stdio: "ignore",
-  });
-}
-
 async function shutdown(exitCode) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -222,19 +236,14 @@ async function shutdown(exitCode) {
     watcher.close();
   }
 
-  await stopApp();
-  killChildTree("TERM");
+  await settlePendingRestartBeforeShutdown(restartQueue, stopApp);
   await new Promise((resolve) => {
     setTimeout(resolve, childTreeGracePeriodMs);
   });
-  killChildTree("KILL");
+  clearDevElectronPids(devPidFilePath, ownerId, desktopDir);
 
   process.exit(exitCode);
 }
-
-startWatchers();
-cleanupStaleDevApps();
-startApp();
 
 process.once("SIGINT", () => {
   void shutdown(130);
@@ -245,3 +254,30 @@ process.once("SIGTERM", () => {
 process.once("SIGHUP", () => {
   void shutdown(129);
 });
+
+const claim = claimDevElectronPids(
+  devPidFilePath,
+  { ownerId, runnerPid: process.pid, app: null },
+  desktopDir,
+  isCapturedPidAlive,
+);
+if (!claim.claimed) {
+  throw new Error(
+    `Could not claim the piCode dev runner PID file (${claim.reason}): ${devPidFilePath}. ` +
+      "Stop any active dev runner or app. If none is running, remove that file and try again.",
+  );
+}
+
+try {
+  await waitForResources({
+    baseDir: desktopDir,
+    files: requiredFiles,
+    tcpHost: devServer.hostname,
+    tcpPort: port,
+  });
+  startWatchers();
+  startApp();
+} catch (error) {
+  clearDevElectronPids(devPidFilePath, ownerId, desktopDir);
+  throw error;
+}

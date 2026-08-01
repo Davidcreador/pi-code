@@ -49,6 +49,28 @@ describe("KeybindingsSettings.logic", () => {
     ]);
   });
 
+  it("keeps row identity stable when a shortcut changes", () => {
+    const binding = {
+      command: "terminal.toggle",
+      shortcut: {
+        key: "j",
+        modKey: true,
+        metaKey: false,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+      },
+    } satisfies ResolvedKeybindingsConfig[number];
+
+    const before = buildKeybindingRows([binding], "");
+    const after = buildKeybindingRows(
+      [{ ...binding, shortcut: { ...binding.shortcut, key: "k" } }],
+      "",
+    );
+
+    expect(after[0]?.id).toBe(before[0]?.id);
+  });
+
   it("captures platform-specific mod shortcuts", () => {
     expect(
       keybindingFromKeyboardEvent(

@@ -110,6 +110,16 @@ export const PRIMARY_INSTANCE_ID = DesktopBackendManager.PRIMARY_INSTANCE_ID;
 export type DesktopBackendInstance = DesktopBackendManager.DesktopBackendInstance;
 export type BackendInstanceSpec = DesktopBackendManager.BackendInstanceSpec;
 
+export function primaryStartupFailureDialog(failure: DesktopBackendManager.BackendStartupFailure): {
+  readonly title: string;
+  readonly content: string;
+} {
+  return {
+    title: "piCode couldn't start",
+    content: `The local backend exited ${failure.attempts} times before becoming ready.\n\nLast failure: ${failure.reason}\n\nLogs: ${failure.logPath ?? "unavailable"}`,
+  };
+}
+
 // Caller tried to register an id that's already in the pool. The pool
 // refuses overwrites so two independent orchestrators racing on the
 // same id surface as a typed failure instead of one silently winning.
@@ -241,7 +251,7 @@ export const layer = Layer.effect(
           );
           yield* electronDialog.showErrorBox(
             "WSL backend is still unavailable",
-            `${reason}\n\nd4 will use the Windows backend for this launch and retry WSL the next time the app starts.`,
+            `${reason}\n\npiCode will use the Windows backend for this launch and retry WSL the next time the app starts.`,
           );
           yield* appSettings.applyWslWindowsFallbackInMemory;
           return true;
@@ -252,7 +262,7 @@ export const layer = Layer.effect(
         });
         yield* electronDialog.showErrorBox(
           "WSL backend couldn't start",
-          `${reason}\n\nFalling back to the Windows backend so d4 can open. Re-enable the WSL backend from Settings > Connections once the WSL distro is fixed.`,
+          `${reason}\n\nFalling back to the Windows backend so piCode can open. Re-enable the WSL backend from Settings > Connections once the WSL distro is fixed.`,
         );
         // Fully disable the WSL backend — both flags, matching the "Switch to
         // Windows" recovery path — so the manager's next restart re-resolves the
@@ -299,6 +309,10 @@ export const layer = Layer.effect(
         ),
       onShutdown: () => desktopWindow.handleBackendNotReady,
       onPreflightFailed: handlePrimaryPreflightFailure,
+      onStartupFailed: (failure) => {
+        const dialog = primaryStartupFailureDialog(failure);
+        return electronDialog.showErrorBox(dialog.title, dialog.content);
+      },
     });
 
     const instancesRef = yield* SynchronizedRef.make<

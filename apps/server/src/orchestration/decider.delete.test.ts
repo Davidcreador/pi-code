@@ -2,6 +2,7 @@ import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
+  MessageId,
   ProjectId,
   ThreadId,
   type OrchestrationCommand,
@@ -137,6 +138,66 @@ function normalizeDeleteEvent(event: PlannedEvent | ReadonlyArray<PlannedEvent>)
 }
 
 it.layer(NodeServices.layer)("decider deletion flows", (it) => {
+  it.effect("rejects turn starts and session updates for archived or deleted threads", () =>
+    Effect.gen(function* () {
+      const activeReadModel = yield* seedReadModel;
+      const commands: ReadonlyArray<OrchestrationCommand> = [
+        {
+          type: "thread.turn.start",
+          commandId: asCommandId("cmd-inactive-turn-start"),
+          threadId: asThreadId("thread-delete-1"),
+          message: {
+            messageId: MessageId.make("message-inactive-turn-start"),
+            role: "user",
+            text: "hello",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+        {
+          type: "thread.session.set",
+          commandId: asCommandId("cmd-inactive-session-set"),
+          threadId: asThreadId("thread-delete-1"),
+          session: {
+            threadId: asThreadId("thread-delete-1"),
+            status: "starting",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+      ];
+
+      for (const state of ["archived", "deleted"] as const) {
+        const inactiveReadModel = {
+          ...activeReadModel,
+          threads: activeReadModel.threads.map((thread) =>
+            thread.id === asThreadId("thread-delete-1")
+              ? {
+                  ...thread,
+                  archivedAt: state === "archived" ? thread.updatedAt : null,
+                  deletedAt: state === "deleted" ? thread.updatedAt : null,
+                }
+              : thread,
+          ),
+        };
+        for (const command of commands) {
+          const error = yield* decideOrchestrationCommand({
+            command,
+            readModel: inactiveReadModel,
+          }).pipe(Effect.flip);
+          expect(error._tag).toBe("OrchestrationCommandInvariantError");
+          expect(error.message).toContain(state);
+        }
+      }
+    }),
+  );
+
   it.effect("rejects deleting a non-empty project without force", () =>
     Effect.gen(function* () {
       const readModel = yield* seedReadModel;

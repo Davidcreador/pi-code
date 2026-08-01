@@ -257,8 +257,8 @@ function UnknownWhenVariableWarning({
         }
       />
       <TooltipPopup side="top" className="max-w-72 whitespace-normal leading-relaxed">
-        d4 does not recognize this condition yet. It can still be saved, but it may not match unless
-        the runtime provides it.
+        piCode does not recognize this condition yet. It can still be saved, but it may not match
+        unless the runtime provides it.
       </TooltipPopup>
     </Tooltip>
   );
@@ -596,6 +596,7 @@ function WhenExpressionBuilder({
 }) {
   const expression = whenAstToExpression(value);
   const [expressionDraft, setExpressionDraft] = useState(expression);
+  useEffect(() => setExpressionDraft(expression), [expression]);
   const parseResult = useMemo(() => parseWhenExpressionDraft(expressionDraft), [expressionDraft]);
   const parseError = parseResult.ok ? null : parseResult.message;
   const unknownIdentifiers = parseResult.ok ? unknownWhenVariables(parseResult.value) : [];
@@ -772,11 +773,12 @@ function KeybindingTableRow({
   allRows: ReadonlyArray<KeybindingRow>;
   variables: ReadonlyArray<WhenVariableOption>;
   isSaving: boolean;
-  onSave: (input: ServerUpsertKeybindingInput) => void;
+  onSave: (input: ServerUpsertKeybindingInput, rowId: string) => void;
   onReset: (row: KeybindingRow) => void;
   onRemove: (row: KeybindingRow) => void;
 }) {
   const [draft, setDraft] = useReducer(keybindingRowDraftReducer, row, createKeybindingRowDraft);
+  useEffect(() => setDraft(createKeybindingRowDraft(row)), [row.key, row.when]);
   const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
   const whenDraftExpression = whenAstToExpression(whenDraft);
   const isDirty = keyDraft !== row.key || whenDraftExpression !== row.when;
@@ -792,12 +794,15 @@ function KeybindingTableRow({
   });
 
   const save = () => {
-    onSave({
-      command: row.command,
-      key: keyDraft,
-      when: whenDraftExpression.trim().length > 0 ? whenDraftExpression : undefined,
-      replace: rowKeybindingTarget(row),
-    });
+    onSave(
+      {
+        command: row.command,
+        key: keyDraft,
+        when: whenDraftExpression.trim().length > 0 ? whenDraftExpression : undefined,
+        replace: rowKeybindingTarget(row),
+      },
+      row.id,
+    );
   };
 
   const captureKeybinding = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -873,7 +878,11 @@ function KeybindingTableRow({
         ) : null}
       </div>
       <div className="pr-4">
-        <Popover>
+        <Popover
+          onOpenChange={(open) => {
+            if (!open) setDraft({ isWhenDraftValid: true });
+          }}
+        >
           <PopoverTrigger
             className={cn(
               "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
@@ -944,7 +953,7 @@ function NewKeybindingTableRow({
   allRows: ReadonlyArray<KeybindingRow>;
   variables: ReadonlyArray<WhenVariableOption>;
   isSaving: boolean;
-  onSave: (input: ServerUpsertKeybindingInput) => void;
+  onSave: (input: ServerUpsertKeybindingInput, rowId: "new") => void;
   onCancel: () => void;
 }) {
   const [commandDraft, setCommandDraft] = useState<KeybindingCommand | "">("");
@@ -965,11 +974,14 @@ function NewKeybindingTableRow({
 
   const save = () => {
     if (!commandDraft) return;
-    onSave({
-      command: commandDraft,
-      key: keyDraft,
-      ...(whenDraftExpression.trim().length > 0 ? { when: whenDraftExpression } : {}),
-    });
+    onSave(
+      {
+        command: commandDraft,
+        key: keyDraft,
+        ...(whenDraftExpression.trim().length > 0 ? { when: whenDraftExpression } : {}),
+      },
+      "new",
+    );
   };
 
   const captureKeybinding = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -1035,7 +1047,11 @@ function NewKeybindingTableRow({
         </Button>
       </div>
       <div className="pr-4">
-        <Popover>
+        <Popover
+          onOpenChange={(open) => {
+            if (!open) setDraft({ isWhenDraftValid: true });
+          }}
+        >
           <PopoverTrigger
             className={cn(
               "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
@@ -1099,8 +1115,16 @@ export function KeybindingsSettingsPanel() {
   const [query, setQuery] = useState("");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const [savingCommand, setSavingCommand] = useState<KeybindingCommand | null>(null);
+  const [savingRowIds, setSavingRowIds] = useState<ReadonlySet<string>>(() => new Set());
   const [isAddingBinding, setIsAddingBinding] = useState(false);
+  const setRowSaving = useCallback((rowId: string, saving: boolean) => {
+    setSavingRowIds((current) => {
+      const next = new Set(current);
+      if (saving) next.add(rowId);
+      else next.delete(rowId);
+      return next;
+    });
+  }, []);
   const rows = useMemo(() => buildKeybindingRows(keybindings, query), [keybindings, query]);
   const commandOptions = useMemo(() => buildKeybindingCommandOptions(keybindings), [keybindings]);
   const whenVariables = useMemo(() => buildWhenVariableOptions(), []);
@@ -1148,9 +1172,9 @@ export function KeybindingsSettingsPanel() {
   }, [keybindingsConfigPath, openInPreferredEditor]);
 
   const saveKeybinding = useCallback(
-    (input: ServerUpsertKeybindingInput) => {
+    (input: ServerUpsertKeybindingInput, rowId: string) => {
       if (!primaryEnvironment) return;
-      setSavingCommand(input.command);
+      setRowSaving(rowId, true);
       const payload: ServerUpsertKeybindingInput = {
         command: input.command,
         key: input.key.trim(),
@@ -1162,7 +1186,7 @@ export function KeybindingsSettingsPanel() {
           environmentId: primaryEnvironment.environmentId,
           input: payload,
         });
-        setSavingCommand(null);
+        setRowSaving(rowId, false);
         if (result._tag === "Success") {
           setIsAddingBinding(false);
           return;
@@ -1177,19 +1201,19 @@ export function KeybindingsSettingsPanel() {
         }
       })();
     },
-    [primaryEnvironment, upsertKeybinding],
+    [primaryEnvironment, setRowSaving, upsertKeybinding],
   );
 
   const removeKeybinding = useCallback(
     (row: KeybindingRow) => {
       if (!primaryEnvironment) return;
-      setSavingCommand(row.command);
+      setRowSaving(row.id, true);
       void (async () => {
         const result = await removeKeybindingMutation({
           environmentId: primaryEnvironment.environmentId,
           input: rowKeybindingTarget(row),
         });
-        setSavingCommand(null);
+        setRowSaving(row.id, false);
         if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           toastManager.add({
@@ -1200,22 +1224,25 @@ export function KeybindingsSettingsPanel() {
         }
       })();
     },
-    [primaryEnvironment, removeKeybindingMutation],
+    [primaryEnvironment, removeKeybindingMutation, setRowSaving],
   );
 
   const resetKeybinding = useCallback(
     (row: KeybindingRow) => {
       if (!row.defaultKey) return;
-      saveKeybinding({
-        command: row.command,
-        key: row.defaultKey,
-        when: row.defaultWhen.trim().length > 0 ? row.defaultWhen : undefined,
-        replace: {
+      saveKeybinding(
+        {
           command: row.command,
-          key: row.key,
-          ...(row.when.trim().length > 0 ? { when: row.when } : {}),
+          key: row.defaultKey,
+          when: row.defaultWhen.trim().length > 0 ? row.defaultWhen : undefined,
+          replace: {
+            command: row.command,
+            key: row.key,
+            ...(row.when.trim().length > 0 ? { when: row.when } : {}),
+          },
         },
-      });
+        row.id,
+      );
     },
     [saveKeybinding],
   );
@@ -1283,8 +1310,8 @@ export function KeybindingsSettingsPanel() {
           <div className="flex items-start gap-2 border-b border-warning/20 bg-warning/5 px-3 py-2.5 text-[12px] leading-relaxed text-muted-foreground sm:px-4">
             <InfoIcon className="mt-0.5 size-3.5 shrink-0 text-warning" />
             <p>
-              Some shortcuts may be claimed by the browser before d4 sees them. Use the desktop app
-              for better keybinding support.
+              Some shortcuts may be claimed by the browser before piCode sees them. Use the desktop
+              app for better keybinding support.
             </p>
           </div>
         ) : null}
@@ -1307,7 +1334,7 @@ export function KeybindingsSettingsPanel() {
                 commandOptions={commandOptions}
                 allRows={rows}
                 variables={whenVariables}
-                isSaving={savingCommand !== null}
+                isSaving={savingRowIds.has("new")}
                 onSave={saveKeybinding}
                 onCancel={() => setIsAddingBinding(false)}
               />
@@ -1318,7 +1345,7 @@ export function KeybindingsSettingsPanel() {
                 row={row}
                 allRows={rows}
                 variables={whenVariables}
-                isSaving={savingCommand === row.command}
+                isSaving={savingRowIds.has(row.id)}
                 onSave={saveKeybinding}
                 onReset={resetKeybinding}
                 onRemove={removeKeybinding}

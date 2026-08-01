@@ -6,6 +6,7 @@ import {
   type ProjectId,
   ThreadId,
   TurnId,
+  type OrchestrationCheckpointSummary,
   type OrchestrationEvent,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
@@ -22,9 +23,12 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
 import {
   checkpointRefForThreadTurn,
+  MAX_THREAD_CHECKPOINTS,
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -32,7 +36,6 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import type { OrchestrationDispatchError } from "../Errors.ts";
-import { isGitRepository } from "../../git/Utils.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 
@@ -59,6 +62,28 @@ function sameId(left: string | null | undefined, right: string | null | undefine
   return left === right;
 }
 
+type CheckpointIdentity = Pick<
+  OrchestrationCheckpointSummary,
+  "turnId" | "checkpointTurnCount" | "checkpointRef"
+>;
+
+export function checkpointRefsBeyondLimit(
+  checkpoints: ReadonlyArray<CheckpointIdentity>,
+  next: CheckpointIdentity,
+): ReadonlyArray<CheckpointRef> {
+  const ordered = [
+    ...checkpoints.filter(
+      (checkpoint) =>
+        checkpoint.turnId !== next.turnId &&
+        checkpoint.checkpointTurnCount !== next.checkpointTurnCount,
+    ),
+    next,
+  ].toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount);
+  return ordered
+    .slice(0, Math.max(0, ordered.length - MAX_THREAD_CHECKPOINTS))
+    .map((checkpoint) => checkpoint.checkpointRef);
+}
+
 function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
   switch (status) {
     case "failed":
@@ -82,6 +107,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -117,6 +143,27 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+
+  const appendCheckpointUnavailable = Effect.fn("appendCheckpointUnavailable")(function* (
+    threadId: ThreadId,
+    createdAt: string,
+  ) {
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: yield* serverCommandId("checkpoint-unavailable"),
+      threadId,
+      activity: {
+        id: yield* serverEventId,
+        tone: "info",
+        kind: "checkpoint.unavailable",
+        summary: "Checkpoints unavailable",
+        payload: { detail: "This workspace is not inside a Git worktree." },
+        turnId: null,
+        createdAt,
+      },
+      createdAt,
+    });
+  });
 
   const appendCaptureFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -174,12 +221,10 @@ const make = Effect.gen(function* () {
     return project ? [project] : [];
   });
 
-  const isGitWorkspace = (cwd: string) => isGitRepository(cwd);
+  const isGitWorkspace = checkpointStore.isGitRepository;
 
   // Resolves the workspace CWD for checkpoint operations, preferring the
   // active provider session CWD and falling back to the thread/project config.
-  // Returns undefined when no CWD can be determined or the workspace is not
-  // a git repository.
   const resolveCheckpointCwd = Effect.fn("resolveCheckpointCwd")(function* (input: {
     readonly threadId: ThreadId;
     readonly thread: { readonly projectId: ProjectId; readonly worktreePath: string | null };
@@ -203,12 +248,6 @@ const make = Effect.gen(function* () {
           onSome: (runtime) => runtime.cwd,
         }));
 
-    if (!cwd) {
-      return undefined;
-    }
-    if (!isGitWorkspace(cwd)) {
-      return undefined;
-    }
     return cwd;
   });
 
@@ -234,6 +273,27 @@ const make = Effect.gen(function* () {
     const fromTurnCount = Math.max(0, input.turnCount - 1);
     const fromCheckpointRef = checkpointRefForThreadTurn(input.threadId, fromTurnCount);
     const targetCheckpointRef = checkpointRefForThreadTurn(input.threadId, input.turnCount);
+    const checkpointTurns = yield* projectionTurnRepository.listByThreadId({
+      threadId: input.threadId,
+    });
+    const checkpointRefsToPrune = checkpointRefsBeyondLimit(
+      checkpointTurns.flatMap((turn): CheckpointIdentity[] =>
+        turn.turnId !== null && turn.checkpointTurnCount !== null && turn.checkpointRef !== null
+          ? [
+              {
+                turnId: turn.turnId,
+                checkpointTurnCount: turn.checkpointTurnCount,
+                checkpointRef: turn.checkpointRef,
+              },
+            ]
+          : [],
+      ),
+      {
+        turnId: input.turnId,
+        checkpointTurnCount: input.turnCount,
+        checkpointRef: targetCheckpointRef,
+      },
+    );
 
     const fromCheckpointExists = yield* checkpointStore.hasCheckpointRef({
       cwd: input.cwd,
@@ -311,6 +371,22 @@ const make = Effect.gen(function* () {
       checkpointTurnCount: input.turnCount,
       createdAt: input.createdAt,
     });
+    if (checkpointRefsToPrune.length > 0) {
+      yield* checkpointStore
+        .deleteCheckpointRefs({
+          cwd: input.cwd,
+          checkpointRefs: checkpointRefsToPrune,
+        })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("failed to prune expired checkpoint refs", {
+              threadId: input.threadId,
+              checkpointRefCount: checkpointRefsToPrune.length,
+              detail: error.message,
+            }),
+          ),
+        );
+    }
     yield* receiptBus.publish({
       type: "checkpoint.diff.finalized",
       threadId: input.threadId,
@@ -384,7 +460,7 @@ const make = Effect.gen(function* () {
         projects,
         preferSessionRuntime: true,
       });
-      if (!checkpointCwd) {
+      if (!checkpointCwd || !(yield* isGitWorkspace(checkpointCwd))) {
         return;
       }
 
@@ -460,7 +536,7 @@ const make = Effect.gen(function* () {
       projects,
       preferSessionRuntime: true,
     });
-    if (!checkpointCwd) {
+    if (!checkpointCwd || !(yield* isGitWorkspace(checkpointCwd))) {
       return;
     }
 
@@ -495,7 +571,11 @@ const make = Effect.gen(function* () {
         projects,
         preferSessionRuntime: false,
       });
-      if (!checkpointCwd) {
+      if (!checkpointCwd) return;
+      if (!(yield* isGitWorkspace(checkpointCwd))) {
+        if (!thread.activities.some((activity) => activity.kind === "checkpoint.unavailable")) {
+          yield* appendCheckpointUnavailable(thread.id, event.createdAt);
+        }
         return;
       }
 
@@ -577,7 +657,11 @@ const make = Effect.gen(function* () {
       projects,
       preferSessionRuntime: false,
     });
-    if (!checkpointCwd) {
+    if (!checkpointCwd) return;
+    if (!(yield* isGitWorkspace(checkpointCwd))) {
+      if (!thread.activities.some((activity) => activity.kind === "checkpoint.unavailable")) {
+        yield* appendCheckpointUnavailable(threadId, event.occurredAt);
+      }
       return;
     }
 
@@ -633,7 +717,7 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.catch(() => Effect.void));
       return;
     }
-    if (!isGitWorkspace(sessionRuntime.value.cwd)) {
+    if (!(yield* isGitWorkspace(sessionRuntime.value.cwd))) {
       yield* appendRevertFailureActivity({
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
@@ -675,24 +759,22 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const restored = yield* checkpointStore.restoreCheckpoint({
+    const targetCheckpointExists = yield* checkpointStore.hasCheckpointRef({
       cwd: sessionRuntime.value.cwd,
       checkpointRef: targetCheckpointRef,
-      fallbackToHead: event.payload.turnCount === 0,
     });
-    if (!restored) {
+    if (!targetCheckpointExists) {
       yield* appendRevertFailureActivity({
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
-        detail: `Filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`,
+        detail:
+          event.payload.turnCount === 0
+            ? "The baseline checkpoint is unavailable; revert was refused to preserve work that predates this thread."
+            : `Filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`,
         createdAt: now,
       }).pipe(Effect.catch(() => Effect.void));
       return;
     }
-
-    // Refresh the workspace entry index so the @-mention file picker
-    // reflects the reverted filesystem state.
-    yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
 
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
@@ -701,6 +783,29 @@ const make = Effect.gen(function* () {
         numTurns: rolledBackTurns,
       });
     }
+
+    const restored = yield* checkpointStore.restoreCheckpoint({
+      cwd: sessionRuntime.value.cwd,
+      checkpointRef: targetCheckpointRef,
+    });
+    if (!restored) {
+      yield* appendRevertFailureActivity({
+        threadId: event.payload.threadId,
+        turnCount: event.payload.turnCount,
+        detail:
+          event.payload.turnCount === 0
+            ? "The baseline checkpoint is unavailable; revert was refused to preserve work that predates this thread."
+            : rolledBackTurns > 0
+              ? `Provider conversation was rolled back, but the filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`
+              : `Filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`,
+        createdAt: now,
+      }).pipe(Effect.catch(() => Effect.void));
+      return;
+    }
+
+    // Refresh the workspace entry index so the @-mention file picker
+    // reflects the reverted filesystem state.
+    yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
 
     const staleCheckpointRefs: Array<CheckpointRef> = [];
     for (const checkpoint of thread.checkpoints) {
@@ -739,7 +844,16 @@ const make = Effect.gen(function* () {
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
     if (event.type === "thread.turn-start-requested" || event.type === "thread.message-sent") {
-      yield* ensurePreTurnBaselineFromDomainTurnStart(event);
+      yield* ensurePreTurnBaselineFromDomainTurnStart(event).pipe(
+        Effect.catch((error) =>
+          appendCaptureFailureActivity({
+            threadId: event.payload.threadId,
+            turnId: null,
+            detail: `Pre-turn baseline capture failed: ${error.message}`,
+            createdAt: event.occurredAt,
+          }).pipe(Effect.catch(() => Effect.void)),
+        ),
+      );
       return;
     }
 
@@ -760,10 +874,7 @@ const make = Effect.gen(function* () {
     }
 
     // When ProviderRuntimeIngestion creates a placeholder checkpoint (status "missing")
-    // from a turn.diff.updated runtime event, capture the real git checkpoint to
-    // replace it. The providerService.streamEvents PubSub does not reliably deliver
-    // turn.completed runtime events to this reactor (shared subscription), so
-    // reacting to the domain event is the reliable path.
+    // from a turn.diff.updated runtime event, capture the real git checkpoint to replace it.
     if (event.type === "thread.turn-diff-completed") {
       yield* captureCheckpointFromPlaceholder(event).pipe(
         Effect.catch((error) =>
@@ -784,7 +895,16 @@ const make = Effect.gen(function* () {
     event: ProviderRuntimeEvent,
   ) {
     if (event.type === "turn.started") {
-      yield* ensurePreTurnBaselineFromTurnStart(event);
+      yield* ensurePreTurnBaselineFromTurnStart(event).pipe(
+        Effect.catch((error) =>
+          appendCaptureFailureActivity({
+            threadId: event.threadId,
+            turnId: toTurnId(event.turnId),
+            detail: `Pre-turn baseline capture failed: ${error.message}`,
+            createdAt: event.createdAt,
+          }).pipe(Effect.catch(() => Effect.void)),
+        ),
+      );
       return;
     }
 
@@ -863,4 +983,6 @@ const make = Effect.gen(function* () {
   } satisfies CheckpointReactorShape;
 });
 
-export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make);
+export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make).pipe(
+  Layer.provide(ProjectionTurnRepositoryLive),
+);

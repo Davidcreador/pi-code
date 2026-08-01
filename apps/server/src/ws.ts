@@ -2,6 +2,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -297,12 +298,10 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
-// When a resuming client's cursor is more than this many events behind the
-// current head, skip the per-event catch-up replay and send a fresh shell
-// snapshot instead. Replaying each intervening event costs a shell refetch;
-// past this gap a single O(active-threads) snapshot is cheaper and bounded.
-// Matches the event store's default page size (DEFAULT_READ_FROM_SEQUENCE_LIMIT).
-const SHELL_RESUME_MAX_GAP = 1_000;
+// Beyond the event store's default page size, a fresh aggregate snapshot is
+// cheaper and bounded compared with catch-up replay.
+const SUBSCRIPTION_RESUME_MAX_GAP = 1_000;
+const SUBSCRIPTION_BUFFER_CAPACITY = 1_024;
 
 function toAuthAccessStreamEvent(
   change: PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange,
@@ -1410,16 +1409,36 @@ const makeWsRpcLayer = (
               // sequence but the live subscription is not attached yet). Every
               // path below emits from this same buffered live tail. Overlapping
               // events are deduped by sequence on the client.
-              const liveBuffer = yield* Queue.unbounded<ShellLiveInput>();
+              const liveBuffer = yield* Queue.dropping<ShellLiveInput>(
+                SUBSCRIPTION_BUFFER_CAPACITY,
+              );
+              const overflow = yield* Deferred.make<void>();
+              const overflowError = new OrchestrationGetSnapshotError({
+                message: "Orchestration shell subscription overflowed",
+              });
+              const signalOverflow = Effect.logWarning(
+                "orchestration shell subscription overflow",
+              ).pipe(Effect.andThen(Deferred.succeed(overflow, undefined)), Effect.asVoid);
               yield* Effect.forkScoped(
                 orchestrationEngine.streamDomainEvents.pipe(
                   Stream.runForEach((event) =>
-                    Queue.offer(liveBuffer, { kind: "event" as const, event }),
+                    Queue.offer(liveBuffer, { kind: "event" as const, event }).pipe(
+                      Effect.flatMap((offered) =>
+                        offered
+                          ? Effect.void
+                          : signalOverflow.pipe(Effect.andThen(Effect.interrupt)),
+                      ),
+                    ),
                   ),
                 ),
                 { startImmediately: true },
               );
-              const bufferedLiveStream = coalesceShellLiveStream(Stream.fromQueue(liveBuffer));
+              const bufferedLiveStream = Stream.merge(
+                coalesceShellLiveStream(Stream.fromQueue(liveBuffer)),
+                Stream.fromEffect(
+                  Deferred.await(overflow).pipe(Effect.andThen(Effect.fail(overflowError))),
+                ),
+              );
 
               const loadSnapshot = projectionSnapshotQuery.getShellSnapshot().pipe(
                 Effect.tapError((cause) =>
@@ -1441,10 +1460,18 @@ const makeWsRpcLayer = (
                 input.requestCompletionMarker === true
                   ? Stream.concat(
                       Stream.fromEffect(
-                        Queue.offer(liveBuffer, { kind: "synchronized" as const }).pipe(
-                          Effect.andThen(Queue.takeAll(liveBuffer)),
-                          Effect.flatMap(coalesceShellLiveInputs),
-                        ),
+                        Effect.gen(function* () {
+                          const offered = yield* Queue.offer(liveBuffer, {
+                            kind: "synchronized" as const,
+                          });
+                          if (!offered) {
+                            yield* signalOverflow;
+                            return yield* overflowError;
+                          }
+                          return yield* Queue.takeAll(liveBuffer).pipe(
+                            Effect.flatMap(coalesceShellLiveInputs),
+                          );
+                        }),
                       ).pipe(Stream.flatMap((items) => Stream.fromIterable(items))),
                       bufferedLiveStream,
                     )
@@ -1466,7 +1493,7 @@ const makeWsRpcLayer = (
                 // is also invalid, so reset it with a snapshot. Send the snapshot
                 // followed by the buffered live tail, exactly as the
                 // no-afterSequence path does.
-                if (replayGap < 0 || replayGap > SHELL_RESUME_MAX_GAP) {
+                if (replayGap < 0 || replayGap > SUBSCRIPTION_RESUME_MAX_GAP) {
                   const snapshot = yield* loadSnapshot;
                   return Stream.concat(
                     Stream.make({ kind: "snapshot" as const, snapshot }),
@@ -1538,94 +1565,108 @@ const makeWsRpcLayer = (
 
               // Attach live delivery before reading either replay or snapshot state.
               // Otherwise an event published while the snapshot is loading is lost.
-              const liveBuffer = yield* Queue.unbounded<OrchestrationThreadStreamItem>();
-              yield* Effect.forkScoped(
-                liveStream.pipe(Stream.runForEach((item) => Queue.offer(liveBuffer, item))),
+              const liveBuffer = yield* Queue.dropping<OrchestrationThreadStreamItem>(
+                SUBSCRIPTION_BUFFER_CAPACITY,
               );
-              const bufferedLiveStream = Stream.fromQueue(liveBuffer);
-
-              // When the client already loaded the snapshot over HTTP it passes
-              // that snapshot's sequence, and we resume the live subscription by
-              // replaying persisted events after it instead of re-sending the
-              // (potentially multi-KB) snapshot frame over the socket.
-              //
-              // The live PubSub subscription must be attached *before* draining
-              // the catch-up replay, otherwise events published during the replay
-              // window are dropped (they are past the persisted tail the replay
-              // read, but the live stream is not yet subscribed). So fork the
-              // live stream into a buffer bound to this stream's scope, then emit
-              // catch-up followed by the buffered/ongoing live events. Overlapping
-              // events are deduped by sequence on the client.
-              //
-              // Read the full range after the cursor (not the store's default
-              // page-bounded limit): the range is normally tiny (a fresh HTTP
-              // snapshot sequence) and the per-thread filter runs after reading,
-              // so a global cap could otherwise omit this thread's events.
-              if (input.afterSequence !== undefined) {
-                const afterSequence = input.afterSequence;
-                const catchUpStream = orchestrationEngine
-                  .readEvents(afterSequence, Number.MAX_SAFE_INTEGER)
-                  .pipe(
-                    Stream.filter(isThisThreadDetailEvent),
-                    Stream.map((event) => ({
-                      kind: "event" as const,
-                      event: projectActivityEvent(event),
-                    })),
-                    Stream.mapError(
-                      (cause) =>
-                        new OrchestrationGetSnapshotError({
-                          message: `Failed to replay thread ${input.threadId} events`,
-                          cause,
-                        }),
+              const overflow = yield* Deferred.make<void>();
+              const overflowError = new OrchestrationGetSnapshotError({
+                message: `Orchestration thread ${input.threadId} subscription overflowed`,
+              });
+              const signalOverflow = Effect.logWarning(
+                "orchestration thread subscription overflow",
+                { threadId: input.threadId },
+              ).pipe(Effect.andThen(Deferred.succeed(overflow, undefined)), Effect.asVoid);
+              yield* Effect.forkScoped(
+                liveStream.pipe(
+                  Stream.runForEach((item) =>
+                    Queue.offer(liveBuffer, item).pipe(
+                      Effect.flatMap((offered) =>
+                        offered
+                          ? Effect.void
+                          : signalOverflow.pipe(Effect.andThen(Effect.interrupt)),
+                      ),
                     ),
-                  );
-                const afterCatchUp =
-                  input.requestCompletionMarker === true
-                    ? Stream.concat(
-                        Stream.fromEffect(
-                          Queue.offer(liveBuffer, { kind: "synchronized" as const }),
-                        ).pipe(Stream.drain),
-                        bufferedLiveStream,
-                      )
-                    : bufferedLiveStream;
-                return Stream.concat(catchUpStream, afterCatchUp);
-              }
-
-              const snapshot = yield* projectionSnapshotQuery
-                .getThreadDetailSnapshot(input.threadId)
-                .pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new OrchestrationGetSnapshotError({
-                        message: `Failed to load thread ${input.threadId}`,
-                        cause,
-                      }),
                   ),
-                );
+                ),
+                { startImmediately: true },
+              );
+              const bufferedLiveStream = Stream.merge(
+                Stream.fromQueue(liveBuffer),
+                Stream.fromEffect(
+                  Deferred.await(overflow).pipe(Effect.andThen(Effect.fail(overflowError))),
+                ),
+              );
 
-              if (Option.isNone(snapshot)) {
-                return yield* new OrchestrationGetSnapshotError({
-                  message: `Thread ${input.threadId} was not found`,
-                  cause: input.threadId,
-                });
-              }
-
-              const afterSnapshot =
+              const synchronizedThenLive =
                 input.requestCompletionMarker === true
                   ? Stream.concat(
                       Stream.fromEffect(
-                        Queue.offer(liveBuffer, { kind: "synchronized" as const }),
+                        Effect.gen(function* () {
+                          const offered = yield* Queue.offer(liveBuffer, {
+                            kind: "synchronized" as const,
+                          });
+                          if (!offered) {
+                            yield* signalOverflow;
+                            return yield* overflowError;
+                          }
+                        }),
                       ).pipe(Stream.drain),
                       bufferedLiveStream,
                     )
                   : bufferedLiveStream;
-              return Stream.concat(
-                Stream.make({
-                  kind: "snapshot" as const,
-                  snapshot: projectThreadDetailSnapshot(snapshot.value),
-                }),
-                afterSnapshot,
-              );
+
+              const loadSnapshotStream = Effect.gen(function* () {
+                const snapshot = yield* projectionSnapshotQuery
+                  .getThreadDetailSnapshot(input.threadId)
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationGetSnapshotError({
+                          message: `Failed to load thread ${input.threadId}`,
+                          cause,
+                        }),
+                    ),
+                  );
+                if (Option.isNone(snapshot)) {
+                  return yield* new OrchestrationGetSnapshotError({
+                    message: `Thread ${input.threadId} was not found`,
+                    cause: input.threadId,
+                  });
+                }
+                return Stream.concat(
+                  Stream.make({
+                    kind: "snapshot" as const,
+                    snapshot: projectThreadDetailSnapshot(snapshot.value),
+                  }),
+                  synchronizedThenLive,
+                );
+              });
+
+              if (input.afterSequence !== undefined) {
+                const afterSequence = input.afterSequence;
+                const headSequence = yield* orchestrationEngine.latestSequence;
+                const replayGap = headSequence - afterSequence;
+                if (replayGap < 0 || replayGap > SUBSCRIPTION_RESUME_MAX_GAP) {
+                  return yield* loadSnapshotStream;
+                }
+                const catchUpStream = orchestrationEngine.readEvents(afterSequence, replayGap).pipe(
+                  Stream.filter(isThisThreadDetailEvent),
+                  Stream.map((event) => ({
+                    kind: "event" as const,
+                    event: projectActivityEvent(event),
+                  })),
+                  Stream.mapError(
+                    (cause) =>
+                      new OrchestrationGetSnapshotError({
+                        message: `Failed to replay thread ${input.threadId} events`,
+                        cause,
+                      }),
+                  ),
+                );
+                return Stream.concat(catchUpStream, synchronizedThenLive);
+              }
+
+              return yield* loadSnapshotStream;
             }),
             { "rpc.aggregate": "orchestration" },
           ),
@@ -2321,6 +2362,7 @@ const makeWsRpcLayer = (
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     return HttpRouter.add(
       "GET",
@@ -2343,7 +2385,12 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           Effect.provide(
             makeWsRpcLayer(session, previewAutomationBroker).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
-              Layer.provide(ProviderMaintenanceRunner.layer),
+              Layer.provide(
+                Layer.succeed(
+                  ProviderMaintenanceRunner.ProviderMaintenanceRunner,
+                  providerMaintenanceRunner,
+                ),
+              ),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(

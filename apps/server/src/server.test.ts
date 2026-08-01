@@ -126,6 +126,31 @@ import * as Data from "effect/Data";
 const defaultProjectId = ProjectId.make("project-default");
 const defaultThreadId = ThreadId.make("thread-default");
 const defaultDesktopBootstrapToken = "test-desktop-bootstrap-token";
+
+function makeSubscriptionMessageEvent(sequence: number): OrchestrationEvent {
+  return {
+    sequence,
+    eventId: EventId.make(`event-subscription-${sequence}`),
+    aggregateKind: "thread",
+    aggregateId: defaultThreadId,
+    occurredAt: "2026-01-01T00:00:01.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.message-sent",
+    payload: {
+      threadId: defaultThreadId,
+      messageId: MessageId.make(`message-subscription-${sequence}`),
+      role: "user",
+      text: `Message ${sequence}`,
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z",
+    },
+  };
+}
 const defaultModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5-codex",
@@ -5973,6 +5998,185 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(items[1]?.kind, "event");
       assert.equal(items[1]?.kind === "event" ? items[1].event.sequence : null, 2);
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("disconnects a shell subscription when its live buffer overflows", () =>
+    Effect.gen(function* () {
+      const events = Array.from({ length: 1_025 }, (_, index) =>
+        makeSubscriptionMessageEvent(index + 1),
+      );
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            streamDomainEvents: Stream.fromIterable(events),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Effect.sleep("100 millis").pipe(
+                Effect.as({
+                  snapshotSequence: 0,
+                  projects: [],
+                  threads: [makeDefaultOrchestrationThreadShell()],
+                  updatedAt: "2026-01-01T00:00:00.000Z",
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const error = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(Stream.runCollect),
+        ),
+      ).pipe(Effect.flip, Effect.timeout("2 seconds"));
+
+      assert.equal(error._tag, "OrchestrationGetSnapshotError");
+      assert.equal(error.message, "Orchestration shell subscription overflowed");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("disconnects a thread subscription when its live buffer overflows", () =>
+    Effect.gen(function* () {
+      const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+      const events = Array.from({ length: 1_025 }, (_, index) =>
+        makeSubscriptionMessageEvent(index + 1),
+      );
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            streamDomainEvents: Stream.fromIterable(events),
+          },
+          projectionSnapshotQuery: {
+            getThreadDetailSnapshot: () =>
+              Effect.sleep("100 millis").pipe(
+                Effect.as(Option.some({ snapshotSequence: 0, thread })),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const error = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: defaultThreadId,
+          }).pipe(Stream.runCollect),
+        ),
+      ).pipe(Effect.flip, Effect.timeout("2 seconds"));
+
+      assert.equal(error._tag, "OrchestrationGetSnapshotError");
+      assert.equal(
+        error.message,
+        `Orchestration thread ${defaultThreadId} subscription overflowed`,
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("subscribeThread sends a fresh snapshot instead of replaying a large gap", () =>
+    Effect.gen(function* () {
+      const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+      let readEventsCalls = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            latestSequence: Effect.succeed(100_000),
+            readEvents: () => {
+              readEventsCalls += 1;
+              return Stream.empty;
+            },
+          },
+          projectionSnapshotQuery: {
+            getThreadDetailSnapshot: () =>
+              Effect.succeed(Option.some({ snapshotSequence: 100_000, thread })),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: defaultThreadId,
+            afterSequence: 5,
+            requestCompletionMarker: true,
+          }).pipe(Stream.take(2), Stream.runCollect),
+        ),
+      );
+
+      assert.equal(items[0]?.kind, "snapshot");
+      assert.deepEqual(items[1], { kind: "synchronized" });
+      assert.equal(readEventsCalls, 0);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("subscribeThread bounds catch-up replay at the captured head", () =>
+    Effect.gen(function* () {
+      let replayAfterSequence: number | undefined;
+      let replayLimit: number | undefined;
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            latestSequence: Effect.succeed(12),
+            readEvents: (afterSequence, limit) => {
+              replayAfterSequence = afterSequence;
+              replayLimit = limit;
+              return Stream.empty;
+            },
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const first = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: defaultThreadId,
+            afterSequence: 5,
+            requestCompletionMarker: true,
+          }).pipe(Stream.runHead),
+        ),
+      );
+
+      assert.deepEqual(Option.getOrThrow(first), { kind: "synchronized" });
+      assert.equal(replayAfterSequence, 5);
+      assert.equal(replayLimit, 7);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("subscribeThread replaces a cursor ahead of the authoritative head", () =>
+    Effect.gen(function* () {
+      const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+      let readEventsCalls = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            latestSequence: Effect.succeed(5),
+            readEvents: () => {
+              readEventsCalls += 1;
+              return Stream.empty;
+            },
+          },
+          projectionSnapshotQuery: {
+            getThreadDetailSnapshot: () =>
+              Effect.succeed(Option.some({ snapshotSequence: 5, thread })),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const first = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: defaultThreadId,
+            afterSequence: 10,
+          }).pipe(Stream.runHead),
+        ),
+      );
+
+      assert.equal(Option.getOrThrow(first).kind, "snapshot");
+      assert.equal(readEventsCalls, 0);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("subscribeShell sends a fresh snapshot instead of replaying a large gap", () =>

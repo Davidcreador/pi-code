@@ -78,4 +78,60 @@ describe("DesktopLocalEnvironmentAuth", () => {
       assert.strictEqual(yield* Ref.get(requestCount), 1);
     }),
   );
+
+  it.effect("refreshes the bearer token when the backend auth context changes", () =>
+    Effect.gen(function* () {
+      const requestCount = yield* Ref.make(0);
+      const currentConfig = yield* Ref.make(config);
+      const httpClientLayer = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Ref.updateAndGet(requestCount, (count) => count + 1).pipe(
+            Effect.map((count) =>
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(
+                  JSON.stringify({
+                    access_token: `desktop-bearer-token-${count}`,
+                    issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+                    token_type: "Bearer",
+                    expires_in: 3600,
+                    scope: "orchestration:read",
+                  }),
+                  { status: 200, headers: { "content-type": "application/json" } },
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      const poolLayer = Layer.succeed(DesktopBackendPool.DesktopBackendPool, {
+        list: Effect.succeed([
+          {
+            id: PRIMARY_LOCAL_ENVIRONMENT_ID,
+            label: Effect.succeed("Windows"),
+            currentConfig: Ref.get(currentConfig).pipe(Effect.map(Option.some)),
+          },
+        ]),
+      } as unknown as DesktopBackendPool.DesktopBackendPool["Service"]);
+      const testLayer = DesktopLocalEnvironmentAuth.layer.pipe(
+        Layer.provide(Layer.mergeAll(poolLayer, httpClientLayer)),
+      );
+
+      yield* Effect.gen(function* () {
+        const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+        assert.equal(yield* auth.getBearerToken, "desktop-bearer-token-1");
+        yield* Ref.update(currentConfig, (current) => ({
+          ...current,
+          httpBaseUrl: new URL("http://127.0.0.1:4773/api/"),
+          bootstrap: {
+            ...current.bootstrap,
+            desktopBootstrapToken: "replacement-bootstrap-token",
+          },
+        }));
+        assert.equal(yield* auth.getBearerToken, "desktop-bearer-token-2");
+        assert.equal(yield* Ref.get(requestCount), 2);
+      }).pipe(Effect.provide(testLayer));
+    }),
+  );
 });

@@ -51,8 +51,10 @@ import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../..
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateErrorAffordance,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
+  requestDesktopUpdateCheck,
   resolveDesktopUpdateButtonAction,
 } from "../../components/desktopUpdate.logic";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
@@ -422,9 +424,12 @@ function AboutVersionSection() {
       return;
     }
 
-    if (typeof bridge.checkForUpdate !== "function") return;
-    void bridge
-      .checkForUpdate()
+    const check = requestDesktopUpdateCheck(
+      updateState,
+      typeof bridge.checkForUpdate === "function" ? () => bridge.checkForUpdate() : undefined,
+    );
+    if (!check) return;
+    void check
       .then((result) => {
         if (!result.checked) {
           toastManager.add(
@@ -449,6 +454,7 @@ function AboutVersionSection() {
   }, [updateState]);
 
   const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
+  const errorAffordance = getDesktopUpdateErrorAffordance(updateState);
   const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState) : null;
   const buttonDisabled =
     action === "none"
@@ -462,11 +468,16 @@ function AboutVersionSection() {
     "up-to-date": "Up to Date",
   };
   const buttonLabel =
-    actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates";
-  const description =
-    action === "download" || action === "install"
-      ? "Update available."
-      : "Current version of the application.";
+    errorAffordance?.canCheck === true
+      ? "Check Again"
+      : (actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates");
+  const description = errorAffordance ? (
+    <span className="font-medium text-destructive">{errorAffordance.message}</span>
+  ) : action === "download" || action === "install" ? (
+    "Update available."
+  ) : (
+    "Current version of the application."
+  );
 
   return (
     <>
@@ -479,7 +490,13 @@ function AboutVersionSection() {
               render={
                 <Button
                   size="xs"
-                  variant={action === "install" ? "default" : "outline"}
+                  variant={
+                    errorAffordance
+                      ? "destructive-outline"
+                      : action === "install"
+                        ? "default"
+                        : "outline"
+                  }
                   disabled={buttonDisabled}
                   onClick={handleButtonClick}
                 >
@@ -966,7 +983,7 @@ export function AppearanceSettingsPanel() {
       <SettingsSection title="Appearance">
         <SettingsRow
           title="Theme"
-          description="Choose how d4 looks across the app."
+          description="Choose how piCode looks across the app."
           resetAction={
             theme !== "system" ? (
               <SettingResetButton label="theme" onClick={() => setTheme("system")} />

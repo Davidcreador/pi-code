@@ -3,8 +3,13 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
+import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import { checkpointRefPrefixForThread } from "../../checkpointing/Utils.ts";
+import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -36,6 +41,22 @@ export const logCleanupCauseUnlessInterrupted = <R, E>({
     }),
   );
 
+export const deleteThreadCheckpointRefs = Effect.fn("deleteThreadCheckpointRefs")(function* (
+  threadId: ThreadDeletedEvent["payload"]["threadId"],
+) {
+  const checkpointStore = yield* CheckpointStore.CheckpointStore;
+  const projectRepository = yield* ProjectionProjectRepository;
+  const threadRepository = yield* ProjectionThreadRepository;
+  const thread = yield* threadRepository.getById({ threadId });
+  if (Option.isNone(thread)) return;
+  const project = yield* projectRepository.getById({ projectId: thread.value.projectId });
+  if (Option.isNone(project)) return;
+  yield* checkpointStore.deleteCheckpointRefs({
+    cwd: thread.value.worktreePath ?? project.value.workspaceRoot,
+    checkpointRefPrefix: checkpointRefPrefixForThread(threadId),
+  });
+});
+
 const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const providerService = yield* ProviderService;
@@ -55,12 +76,20 @@ const make = Effect.gen(function* () {
       threadId,
     });
 
+  const cleanupThreadCheckpointRefs = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
+    logCleanupCauseUnlessInterrupted({
+      effect: deleteThreadCheckpointRefs(threadId),
+      message: "thread deletion cleanup skipped checkpoint ref deletion",
+      threadId,
+    });
+
   const processThreadDeleted = Effect.fn("processThreadDeleted")(function* (
     event: ThreadDeletedEvent,
   ) {
     const { threadId } = event.payload;
     yield* stopProviderSession(threadId);
     yield* closeThreadTerminals(threadId);
+    yield* cleanupThreadCheckpointRefs(threadId);
   });
 
   const processThreadDeletedSafely = (event: ThreadDeletedEvent) =>
